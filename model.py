@@ -26,8 +26,8 @@ class DiffusionConfig:
     sequence_len: int = 256
     vocab_size: int = 128  # ASCII characters
     n_layer: int = 6
-    n_head: int = 6
-    n_embd: int = 384
+    n_head: int = 8
+    n_embd: int = 256
     max_timesteps: int = 1000  # number of diffusion steps
 
 

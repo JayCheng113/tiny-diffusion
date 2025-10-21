@@ -122,11 +122,15 @@ def train(
     optimizer,
     num_steps=10000,
     sample_interval=1000,
+    patience=500,
 ):
     """
-    Main training loop
+    Main training loop with early stopping
     """
     model.train()
+
+    best_loss = float("inf")
+    steps_without_improvement = 0
 
     pbar = tqdm(range(num_steps), desc="Training")
     for step in pbar:
@@ -136,8 +140,21 @@ def train(
         # Training step
         loss = train_step(model, x_0, noise_schedule, optimizer)
 
+        # Early stopping check
+        if loss < best_loss:
+            best_loss = loss
+            steps_without_improvement = 0
+        else:
+            steps_without_improvement += 1
+
+        if steps_without_improvement >= patience:
+            tqdm.write(
+                f"\nEarly stopping at step {step + 1} (no improvement for {patience} steps)"
+            )
+            break
+
         # Update progress bar
-        pbar.set_postfix({"loss": f"{loss:.4f}"})
+        pbar.set_postfix({"loss": f"{loss:.4f}", "best": f"{best_loss:.4f}"})
 
         # Sample generation
         if (step + 1) % sample_interval == 0:
@@ -161,10 +178,10 @@ def train(
 def main():
     # Configuration
     config = DiffusionConfig(
-        sequence_len=128,
+        sequence_len=256,
         vocab_size=128,  # ASCII
         n_layer=6,
-        n_head=8,  # Changed from 6 to 8 so it divides 256 evenly
+        n_head=8,
         n_embd=256,
         max_timesteps=1000,
     )
@@ -205,6 +222,7 @@ def main():
         optimizer=optimizer,
         num_steps=10000,
         sample_interval=1000,
+        patience=500,
     )
 
     # Save model
