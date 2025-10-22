@@ -39,24 +39,24 @@ def generate_samples(model, num_samples=5, seq_len=256, num_steps=16, temperatur
                 seq_len=seq_len,
                 num_steps=num_steps,
                 temperature=temperature,
-                device=device
+                device=device,
             )
 
             # Decode to text
-            text = ''.join([chr(min(int(c), 127)) for c in tokens[0]])
+            text = "".join([chr(min(int(c), 127)) for c in tokens[0]])
 
-            print(f"--- Sample {i+1} ---")
+            print(f"--- Sample {i + 1} ---")
             print(text)
             print()
 
 
 def main():
     # Device
-    device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Using device: {device}\n")
 
     # Load model
-    checkpoint_path = 'diffusion_model.pt'
+    checkpoint_path = "diffusion_model.pt"
     print(f"Loading model from {checkpoint_path}...")
     model = load_model(checkpoint_path, device)
     print("Model loaded!\n")
@@ -67,9 +67,9 @@ def main():
         num_samples=5,
         seq_len=256,
         num_steps=16,  # Use all diffusion steps
-        temperature=1.0  # Higher = more random, lower = more deterministic
+        temperature=1.0,  # Higher = more random, lower = more deterministic
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
