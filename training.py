@@ -176,14 +176,26 @@ def train(
 
 
 def main():
+    # Hyperparameters (matching the video)
+    batch_size = 64
+    block_size = 256
+    max_iters = 5000
+    eval_interval = 500
+    learning_rate = 3e-4
+    n_embd = 384
+    n_head = 6
+    n_layer = 6
+    num_steps = 32  # Number of diffusion steps
+    # Note: dropout not used in this diffusion model architecture
+
     # Configuration
     config = DiffusionConfig(
-        sequence_len=256,
+        sequence_len=block_size,
         vocab_size=128,  # ASCII
-        n_layer=6,
-        n_head=8,
-        n_embd=256,
-        max_timesteps=16,  # Number of diffusion steps
+        n_layer=n_layer,
+        n_head=n_head,
+        n_embd=n_embd,
+        max_timesteps=num_steps,  # Number of diffusion steps
     )
 
     # Device
@@ -202,13 +214,13 @@ def main():
         num_timesteps=config.max_timesteps, vocab_size=config.vocab_size
     )
 
-    # Optimizer - simple AdamW for now
-    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=0.01)
+    # Optimizer
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
 
     # Data loader
     data_loader = get_data_loader(
         data_path="data.txt",  # You'll need to provide this
-        batch_size=32,
+        batch_size=batch_size,
         seq_len=config.sequence_len,
         device=device,
     )
@@ -220,9 +232,9 @@ def main():
         data_loader=data_loader,
         noise_schedule=noise_schedule,
         optimizer=optimizer,
-        num_steps=10000,
-        sample_interval=500,
-        patience=10000,  # No stopping early
+        num_steps=max_iters,
+        sample_interval=eval_interval,
+        patience=max_iters,  # No early stopping
     )
 
     # Save model

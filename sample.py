@@ -13,9 +13,9 @@ def load_model(checkpoint_path, device):
         sequence_len=256,
         vocab_size=128,
         n_layer=6,
-        n_head=8,
-        n_embd=256,
-        max_timesteps=16,
+        n_head=6,
+        n_embd=384,
+        max_timesteps=32,
     )
 
     model = DiffusionTransformer(config).to(device)
@@ -50,6 +50,98 @@ def generate_samples(model, num_samples=5, seq_len=256, num_steps=16, temperatur
             print()
 
 
+def generate_continuous_blocks(
+    model, num_blocks=100, seq_len=256, num_steps=16, temperature=1.0, context_len=32
+):
+    """
+    Generate multiple blocks sequentially, where each block is conditioned on the
+    last context_len characters of the previous block.
+
+    Args:
+        model: The trained diffusion model
+        num_blocks: Number of blocks to generate
+        seq_len: Length of each sequence block
+        num_steps: Number of denoising steps
+        temperature: Sampling temperature
+        context_len: Number of characters from previous block to condition on (default 32)
+    """
+    device = model.get_device()
+
+    print(
+        f"Generating {num_blocks} continuous blocks with {num_steps} denoising steps..."
+    )
+    print(
+        f"Each block conditions on the last {context_len} characters of the previous block\n"
+    )
+
+    all_text = ""
+
+    for block_idx in range(num_blocks):
+        with torch.no_grad():
+            if block_idx == 0:
+                # First block: generate from scratch
+                tokens = model.sample(
+                    batch_size=1,
+                    seq_len=seq_len,
+                    num_steps=num_steps,
+                    temperature=temperature,
+                    device=device,
+                )
+            else:
+                # Subsequent blocks: condition on last context_len tokens
+                # Start from pure noise
+                x = torch.randint(
+                    0, model.config.vocab_size, (1, seq_len), device=device
+                )
+
+                # Set the first context_len tokens to the last context_len tokens of previous block
+                # These will never be masked during denoising
+                x[0, :context_len] = prev_context
+
+                # Create a mask that protects the first context_len tokens
+                # Denoise step by step, but keep context fixed
+                for t in reversed(range(num_steps)):
+                    t_batch = torch.full((1,), t, device=device, dtype=torch.long)
+                    logits = model.forward(x, t_batch)
+
+                    if t > 0:
+                        # Sample from predicted distribution
+                        probs = torch.nn.functional.softmax(
+                            logits / temperature, dim=-1
+                        )
+                        x_new = torch.multinomial(
+                            probs.view(-1, model.config.vocab_size), num_samples=1
+                        ).view(1, seq_len)
+
+                        # Keep the context fixed, only update the rest
+                        x[:, context_len:] = x_new[:, context_len:]
+                    else:
+                        # Final step: take argmax
+                        x_new = torch.argmax(logits, dim=-1)
+                        x[:, context_len:] = x_new[:, context_len:]
+
+                tokens = x
+
+            # Store the last context_len tokens for next iteration
+            prev_context = tokens[0, -context_len:]
+
+            # Decode to text
+            text = "".join([chr(min(int(c), 127)) for c in tokens[0]])
+
+            # Print in real-time
+            if block_idx == 0:
+                print(text, end="", flush=True)
+                all_text += text
+            else:
+                # Don't repeat the context that was already printed
+                new_text = text[context_len:]
+                print(new_text, end="", flush=True)
+                all_text += new_text
+
+    print("\n")
+    return all_text
+
+
 def main():
     # Device
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
@@ -61,13 +153,14 @@ def main():
     model = load_model(checkpoint_path, device)
     print("Model loaded!\n")
 
-    # Generate samples
-    generate_samples(
+    # Generate continuous blocks
+    generate_continuous_blocks(
         model,
-        num_samples=5,
+        num_blocks=100,
         seq_len=256,
-        num_steps=16,  # Use all diffusion steps
-        temperature=1.0,  # Higher = more random, lower = more deterministic
+        num_steps=32,
+        temperature=1.0,
+        context_len=64,
     )
 
 
