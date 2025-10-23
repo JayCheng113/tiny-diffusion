@@ -122,15 +122,11 @@ def train(
     optimizer,
     num_steps=10000,
     sample_interval=500,
-    patience=500,
 ):
     """
-    Main training loop with early stopping
+    Main training loop
     """
     model.train()
-
-    best_loss = float("inf")
-    steps_without_improvement = 0
 
     pbar = tqdm(range(num_steps), desc="Training")
     for step in pbar:
@@ -140,21 +136,8 @@ def train(
         # Training step
         loss = train_step(model, x_0, noise_schedule, optimizer)
 
-        # Early stopping check
-        if loss < best_loss:
-            best_loss = loss
-            steps_without_improvement = 0
-        else:
-            steps_without_improvement += 1
-
-        if steps_without_improvement >= patience:
-            tqdm.write(
-                f"\nEarly stopping at step {step + 1} (no improvement for {patience} steps)"
-            )
-            break
-
         # Update progress bar
-        pbar.set_postfix({"loss": f"{loss:.4f}", "best": f"{best_loss:.4f}"})
+        pbar.set_postfix({"loss": f"{loss:.4f}"})
 
         # Sample generation
         if (step + 1) % sample_interval == 0:
@@ -176,27 +159,13 @@ def train(
 
 
 def main():
-    # Hyperparameters (matching the video)
+    # Hyperparameters
     batch_size = 64
-    block_size = 256
-    max_iters = 5000
+    max_iters = 10000
     eval_interval = 500
     learning_rate = 3e-4
-    n_embd = 384
-    n_head = 6
-    n_layer = 6
-    num_steps = 32  # Number of diffusion steps
-    # Note: dropout not used in this diffusion model architecture
 
-    # Configuration
-    config = DiffusionConfig(
-        sequence_len=block_size,
-        vocab_size=128,  # ASCII
-        n_layer=n_layer,
-        n_head=n_head,
-        n_embd=n_embd,
-        max_timesteps=num_steps,  # Number of diffusion steps
-    )
+    config = DiffusionConfig()  # default config
 
     # Device
     if torch.cuda.is_available():
@@ -216,11 +185,13 @@ def main():
 
     # Noise schedule
     noise_schedule = DiscreteNoiseSchedule(
-        num_timesteps=config.max_timesteps, vocab_size=config.vocab_size
+        num_timesteps=config.diffusion_steps, vocab_size=config.vocab_size
     )
 
     # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=learning_rate, weight_decay=0.01
+    )
 
     # Data loader
     data_loader = get_data_loader(
@@ -239,7 +210,6 @@ def main():
         optimizer=optimizer,
         num_steps=max_iters,
         sample_interval=eval_interval,
-        patience=max_iters,  # No early stopping
     )
 
     # Save model

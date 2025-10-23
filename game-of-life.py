@@ -7,21 +7,12 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-import numpy as np
 from model import DiffusionTransformer, DiffusionConfig
 
 
 def load_model(checkpoint_path, device):
     """Load a trained model from checkpoint"""
-    # Create model with same config as training
-    config = DiffusionConfig(
-        sequence_len=256,
-        vocab_size=128,
-        n_layer=6,
-        n_head=6,
-        n_embd=384,
-        max_timesteps=32,
-    )
+    config = DiffusionConfig()  # default config
 
     model = DiffusionTransformer(config).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
@@ -200,7 +191,7 @@ def generate_with_game_of_life(
         all_frames.append(tokens.clone().cpu())
         all_masks.append(mask.cpu())
 
-    print(f"Done! Now showing animation...\n")
+    print("Done! Now showing animation...\n")
 
     # Setup matplotlib
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -327,8 +318,8 @@ def main():
         model,
         initial_tokens,
         num_iterations=100,
-        seq_len=256,
-        num_steps=32,
+        seq_len=model.config.sequence_len,
+        num_steps=model.config.diffusion_steps,
         temperature=1.0,
     )
 

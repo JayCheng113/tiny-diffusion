@@ -26,9 +26,9 @@ class DiffusionConfig:
     sequence_len: int = 256
     vocab_size: int = 128  # ASCII characters
     n_layer: int = 6
-    n_head: int = 8
-    n_embd: int = 256
-    max_timesteps: int = 16  # number of diffusion steps
+    n_head: int = 6
+    n_embd: int = 384
+    diffusion_steps: int = 64
 
 
 def norm(x):
@@ -118,7 +118,7 @@ class DiffusionTransformer(nn.Module):
 
         # Token and time embeddings
         self.token_emb = nn.Embedding(config.vocab_size, config.n_embd)
-        self.time_emb = nn.Embedding(config.max_timesteps, config.n_embd)
+        self.time_emb = nn.Embedding(config.diffusion_steps, config.n_embd)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
@@ -214,7 +214,7 @@ class DiffusionTransformer(nn.Module):
         Args:
             batch_size: Number of samples to generate
             seq_len: Length of sequences to generate
-            num_steps: Number of denoising steps (defaults to max_timesteps)
+            num_steps: Number of denoising steps (defaults to diffusion_steps)
             temperature: Sampling temperature
             device: Device to generate on
         Returns:
@@ -223,7 +223,7 @@ class DiffusionTransformer(nn.Module):
         if device is None:
             device = self.get_device()
         if num_steps is None:
-            num_steps = self.config.max_timesteps
+            num_steps = self.config.diffusion_steps
 
         # Start from pure noise (random tokens)
         x = torch.randint(
