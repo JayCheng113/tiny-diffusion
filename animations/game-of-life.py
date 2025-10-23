@@ -98,7 +98,7 @@ def load_initial_text(data_path, num_chars=1024):
 
 
 def generate_with_game_of_life(
-    model, initial_tokens, num_iterations=10, seq_len=256, num_steps=32, temperature=1.0
+    model, initial_tokens, num_iterations=10, temperature=1.0
 ):
     """
     Generate samples using Game of Life rules to determine masking
@@ -109,14 +109,14 @@ def generate_with_game_of_life(
         model: The trained diffusion model
         initial_tokens: Initial 1024 tokens (32x32 grid)
         num_iterations: Number of Game of Life iterations to run
-        seq_len: Sequence length for model (256)
-        num_steps: Number of diffusion denoising steps
         temperature: Sampling temperature
     """
     assert len(initial_tokens) == 1024, "initial_tokens must be 1024 for 32x32 grid"
 
     device = model.get_device()
     tokens = initial_tokens.to(device)
+    seq_len = model.config.sequence_len
+    num_steps = model.config.diffusion_steps
 
     print(f"Pre-calculating {num_iterations} iterations with Game of Life dynamics...")
 
@@ -320,8 +320,6 @@ def main():
         model,
         initial_tokens,
         num_iterations=100,
-        seq_len=model.config.sequence_len,
-        num_steps=model.config.diffusion_steps,
         temperature=1.0,
     )
 

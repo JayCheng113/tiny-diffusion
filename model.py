@@ -29,7 +29,7 @@ class DiffusionConfig:
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
-    diffusion_steps: int = 64
+    diffusion_steps: int = 128
 
     @property
     def total_vocab_size(self):

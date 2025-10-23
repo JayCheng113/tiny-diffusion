@@ -19,26 +19,26 @@ def load_model(checkpoint_path, device):
     return model
 
 
-def generate_samples(model, num_samples=5, seq_len=256, num_steps=16, temperature=1.0):
+def generate_samples(model, num_samples=5, temperature=1.0):
     """Generate text samples from the model"""
     device = model.get_device()
 
     # Create mask schedule
     mask_schedule = MaskedDiffusionSchedule(
         num_timesteps=model.config.diffusion_steps,
-        mask_token_id=model.config.mask_token_id
+        mask_token_id=model.config.mask_token_id,
     )
 
-    print(f"Generating {num_samples} samples with {num_steps} denoising steps...\n")
+    print(f"Generating {num_samples} samples with {model.config.diffusion_steps} denoising steps...\n")
 
     for i in range(num_samples):
         with torch.no_grad():
             # Generate a sample
             tokens = model.sample(
                 batch_size=1,
-                seq_len=seq_len,
+                seq_len=model.config.sequence_len,
                 mask_schedule=mask_schedule,
-                num_steps=num_steps,
+                num_steps=None,
                 temperature=temperature,
                 device=device,
             )
@@ -52,7 +52,7 @@ def generate_samples(model, num_samples=5, seq_len=256, num_steps=16, temperatur
 
 
 def generate_continuous_blocks(
-    model, num_blocks=30, seq_len=256, num_steps=32, temperature=1.0, context_len=64
+    model, num_blocks=30, temperature=1.0, context_len=64
 ):
     """
     Generate multiple blocks sequentially, where each block is conditioned on the
@@ -61,21 +61,19 @@ def generate_continuous_blocks(
     Args:
         model: The trained diffusion model
         num_blocks: Number of blocks to generate
-        seq_len: Length of each sequence block
-        num_steps: Number of denoising steps
         temperature: Sampling temperature
-        context_len: Number of characters from previous block to condition on (default 32)
+        context_len: Number of characters from previous block to condition on
     """
     device = model.get_device()
 
     # Create mask schedule
     mask_schedule = MaskedDiffusionSchedule(
         num_timesteps=model.config.diffusion_steps,
-        mask_token_id=model.config.mask_token_id
+        mask_token_id=model.config.mask_token_id,
     )
 
     print(
-        f"Generating {num_blocks} continuous blocks with {num_steps} denoising steps..."
+        f"Generating {num_blocks} continuous blocks with {model.config.diffusion_steps} denoising steps..."
     )
     print(
         f"Each block conditions on the last {context_len} characters of the previous block\n"
@@ -89,9 +87,9 @@ def generate_continuous_blocks(
                 # First block: generate from scratch
                 tokens = model.sample(
                     batch_size=1,
-                    seq_len=seq_len,
+                    seq_len=model.config.sequence_len,
                     mask_schedule=mask_schedule,
-                    num_steps=num_steps,
+                    num_steps=None,
                     temperature=temperature,
                     device=device,
                 )
@@ -99,7 +97,7 @@ def generate_continuous_blocks(
                 # Subsequent blocks: condition on last context_len tokens
                 # Start from all mask tokens
                 x = torch.full(
-                    (1, seq_len),
+                    (1, model.config.sequence_len),
                     model.config.mask_token_id,
                     dtype=torch.long,
                     device=device,
@@ -111,7 +109,7 @@ def generate_continuous_blocks(
 
                 # Create a mask that protects the first context_len tokens
                 # Denoise step by step, but keep context fixed
-                for t in reversed(range(num_steps)):
+                for t in reversed(range(model.config.diffusion_steps)):
                     t_batch = torch.full((1,), t, device=device, dtype=torch.long)
                     logits = model.forward(x, t_batch)
 
@@ -122,7 +120,7 @@ def generate_continuous_blocks(
                         )
                         x_new = torch.multinomial(
                             probs.view(-1, model.config.vocab_size), num_samples=1
-                        ).view(1, seq_len)
+                        ).view(1, model.config.sequence_len)
 
                         # Keep the context fixed, only update the rest
                         x[:, context_len:] = x_new[:, context_len:]
@@ -173,8 +171,6 @@ def main():
     generate_continuous_blocks(
         model,
         num_blocks=30,
-        seq_len=model.config.sequence_len,
-        num_steps=model.config.diffusion_steps,
         temperature=1.0,
         context_len=64,
     )

@@ -146,7 +146,7 @@ def train(
             with torch.no_grad():
                 samples = model.sample(
                     batch_size=1,
-                    seq_len=100,
+                    seq_len=model.config.sequence_len,
                     mask_schedule=mask_schedule,
                     num_steps=None,  # Use all timesteps
                     temperature=1.0,
