@@ -3,7 +3,7 @@ Sample/inference script for the trained diffusion model
 """
 
 import torch
-from model import DiffusionTransformer, DiffusionConfig
+from model import DiffusionTransformer, DiffusionConfig, decode_tokens
 
 
 def load_model(checkpoint_path, device):
@@ -35,8 +35,8 @@ def generate_samples(model, num_samples=5, seq_len=256, num_steps=16, temperatur
                 device=device,
             )
 
-            # Decode to text
-            text = "".join([chr(min(int(c), 127)) for c in tokens[0]])
+            # Decode tokens to text
+            text = decode_tokens(tokens[0])
 
             print(f"--- Sample {i + 1} ---")
             print(text)
@@ -82,9 +82,12 @@ def generate_continuous_blocks(
                 )
             else:
                 # Subsequent blocks: condition on last context_len tokens
-                # Start from pure noise
-                x = torch.randint(
-                    0, model.config.vocab_size, (1, seq_len), device=device
+                # Start from all mask tokens
+                x = torch.full(
+                    (1, seq_len),
+                    model.config.mask_token_id,
+                    dtype=torch.long,
+                    device=device,
                 )
 
                 # Set the first context_len tokens to the last context_len tokens of previous block
@@ -118,8 +121,8 @@ def generate_continuous_blocks(
             # Store the last context_len tokens for next iteration
             prev_context = tokens[0, -context_len:]
 
-            # Decode to text
-            text = "".join([chr(min(int(c), 127)) for c in tokens[0]])
+            # Decode tokens to text
+            text = decode_tokens(tokens[0])
 
             # Print in real-time
             if block_idx == 0:

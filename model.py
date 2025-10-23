@@ -24,11 +24,17 @@ import torch.nn.functional as F
 @dataclass
 class DiffusionConfig:
     sequence_len: int = 256
-    vocab_size: int = 128  # ASCII characters
+    vocab_size: int = 95  # Printable ASCII characters (32-126)
+    mask_token_id: int = 95  # Special [MASK] token
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
     diffusion_steps: int = 64
+
+    @property
+    def total_vocab_size(self):
+        """Total vocabulary size including mask token"""
+        return self.vocab_size + 1  # 96 tokens total (95 printable + mask)
 
 
 def norm(x):
@@ -116,8 +122,8 @@ class DiffusionTransformer(nn.Module):
         super().__init__()
         self.config = config
 
-        # Token and time embeddings
-        self.token_emb = nn.Embedding(config.vocab_size, config.n_embd)
+        # Token and time embeddings (include mask token in vocab)
+        self.token_emb = nn.Embedding(config.total_vocab_size, config.n_embd)
         self.time_emb = nn.Embedding(config.diffusion_steps, config.n_embd)
 
         # Transformer blocks
@@ -210,7 +216,7 @@ class DiffusionTransformer(nn.Module):
     @torch.inference_mode()
     def sample(self, batch_size, seq_len, num_steps=None, temperature=1.0, device=None):
         """
-        Generate samples using the diffusion process
+        Generate samples using masked diffusion process
         Args:
             batch_size: Number of samples to generate
             seq_len: Length of sequences to generate
@@ -225,9 +231,12 @@ class DiffusionTransformer(nn.Module):
         if num_steps is None:
             num_steps = self.config.diffusion_steps
 
-        # Start from pure noise (random tokens)
-        x = torch.randint(
-            0, self.config.vocab_size, (batch_size, seq_len), device=device
+        # Start from all mask tokens
+        x = torch.full(
+            (batch_size, seq_len),
+            self.config.mask_token_id,
+            dtype=torch.long,
+            device=device,
         )
 
         # Denoise step by step
@@ -238,11 +247,46 @@ class DiffusionTransformer(nn.Module):
             if t > 0:
                 # Sample from predicted distribution
                 probs = F.softmax(logits / temperature, dim=-1)
-                x = torch.multinomial(
+                x_new = torch.multinomial(
                     probs.view(-1, self.config.vocab_size), num_samples=1
                 ).view(batch_size, seq_len)
+
+                # Only update masked positions
+                mask = x == self.config.mask_token_id
+                x = torch.where(mask, x_new, x)
             else:
-                # Final step: take argmax
-                x = torch.argmax(logits, dim=-1)
+                # Final step: take argmax for any remaining masks
+                x_new = torch.argmax(logits, dim=-1)
+                mask = x == self.config.mask_token_id
+                x = torch.where(mask, x_new, x)
 
         return x
+
+
+def encode_text(text):
+    """
+    Convert text to vocab indices
+    Args:
+        text: String of text
+    Returns:
+        tokens: Tensor of vocab indices (0-94)
+    """
+    # Map printable ASCII (32-126) to vocab indices (0-94)
+    # Characters outside this range are mapped to space
+    tokens = torch.tensor(
+        [max(0, min(ord(c), 126) - 32) for c in text], dtype=torch.long
+    )
+    return tokens
+
+
+def decode_tokens(tokens):
+    """
+    Convert vocab indices to text
+    Args:
+        tokens: Tensor or list of vocab indices (0-94)
+    Returns:
+        text: Decoded string
+    """
+    # Map vocab indices (0-94) to ASCII (32-126)
+    text = "".join([chr(int(t) + 32) for t in tokens])
+    return text

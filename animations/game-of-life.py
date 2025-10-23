@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from model import DiffusionTransformer, DiffusionConfig
+from model import DiffusionTransformer, DiffusionConfig, encode_text, decode_tokens
 
 
 def load_model(checkpoint_path, device):
@@ -72,7 +72,8 @@ def display_grid(grid, tokens, mask=None):
             if mask is not None and mask[idx]:
                 row += "⬛"
             else:
-                char = chr(min(int(tokens[idx]), 127))
+                # Decode single token
+                char = decode_tokens([tokens[idx]])
                 # Replace newline with space
                 if char == "\n":
                     char = " "
@@ -91,7 +92,7 @@ def load_initial_text(data_path, num_chars=1024):
         text = text + " " * (num_chars - len(text))
 
     # Convert to tokens
-    tokens = torch.tensor([min(ord(c), 127) for c in text], dtype=torch.long)
+    tokens = encode_text(text)
     return tokens
 
 
@@ -119,7 +120,7 @@ def generate_with_game_of_life(
     print(f"Pre-calculating {num_iterations} iterations with Game of Life dynamics...")
 
     # Convert to 32x32 grid with randomization for different initial patterns each time
-    # Add random noise to tokens before computing binary grid
+    # Add masks to tokens before computing binary grid
     random_offset = torch.randint(0, 256, (1024,), device=device)
     grid = ((tokens + random_offset) % 2).reshape(32, 32)
 
@@ -155,12 +156,14 @@ def generate_with_game_of_life(
 
             # Only process if there are masked positions in this chunk
             if chunk_mask.any():
-                # Get chunk tokens
+                # Get chunk tokens and mask alive cells
                 x = (
                     updated_tokens[start_idx:end_idx].clone().unsqueeze(0)
                 )  # Shape: (1, 256)
+                # Replace alive cells with mask token
+                x[0, chunk_mask] = model.config.mask_token_id
 
-                # Denoise, but only update masked positions (alive cells)
+                # Denoise the masked positions (alive cells)
                 with torch.no_grad():
                     for t in reversed(range(num_steps)):
                         t_batch = torch.full((1,), t, device=device, dtype=torch.long)
@@ -231,9 +234,8 @@ def generate_with_game_of_life(
                 if mask[idx]:
                     row_text += "■"
                 else:
-                    char = chr(min(int(frame_tokens[idx]), 127))
-                    if char == "\n":
-                        char = " "
+                    # Decode single token
+                    char = decode_tokens([frame_tokens[idx]])
                     row_text += char
             lines.append(row_text)
 
@@ -260,9 +262,8 @@ def generate_with_game_of_life(
                 if mask[idx]:
                     row_text += "■"
                 else:
-                    char = chr(min(int(frame_tokens[idx]), 127))
-                    if char == "\n":
-                        char = " "
+                    # Decode single token
+                    char = decode_tokens([frame_tokens[idx]])
                     row_text += char
             lines.append(row_text)
 
