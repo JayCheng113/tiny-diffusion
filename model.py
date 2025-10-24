@@ -24,8 +24,8 @@ import torch.nn.functional as F
 @dataclass
 class DiffusionConfig:
     sequence_len: int = 256
-    vocab_size: int = 95  # Printable ASCII characters (32-126)
-    mask_token_id: int = 95  # Special [MASK] token
+    vocab_size: int = 128  # Full ASCII (0-127), where 0 is reserved for mask
+    mask_token_id: int = 0  # NUL character used as [MASK] token
     n_layer: int = 6
     n_head: int = 6
     n_embd: int = 384
@@ -34,8 +34,8 @@ class DiffusionConfig:
 
     @property
     def total_vocab_size(self):
-        """Total vocabulary size including mask token"""
-        return self.vocab_size + 1  # 96 tokens total (95 printable + mask)
+        """Total vocabulary size (128 tokens including mask at 0)"""
+        return self.vocab_size
 
 
 def norm(x):
@@ -268,29 +268,12 @@ class DiffusionTransformer(nn.Module):
 
 
 def encode_text(text):
-    """
-    Convert text to vocab indices
-    Args:
-        text: String of text
-    Returns:
-        tokens: Tensor of vocab indices (0-94)
-    """
-    # Map printable ASCII (32-126) to vocab indices (0-94)
-    # Characters outside this range are mapped to space
-    tokens = torch.tensor(
-        [max(0, min(ord(c), 126) - 32) for c in text], dtype=torch.long
-    )
+    """Convert text to vocab indices using direct ASCII mapping"""
+    tokens = torch.tensor([min(ord(c), 127) for c in text], dtype=torch.long)
     return tokens
 
 
 def decode_tokens(tokens):
-    """
-    Convert vocab indices to text
-    Args:
-        tokens: Tensor or list of vocab indices (0-94)
-    Returns:
-        text: Decoded string
-    """
-    # Map vocab indices (0-94) to ASCII (32-126)
-    text = "".join([chr(int(t) + 32) for t in tokens])
+    """Convert vocab indices to text using direct ASCII mapping"""
+    text = "".join([chr(int(t)) for t in tokens])
     return text
