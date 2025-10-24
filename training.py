@@ -142,7 +142,7 @@ def train(
 def main():
     # Hyperparameters
     batch_size = 64
-    max_iters = 10000
+    max_iters = 20000
     eval_interval = 500
     learning_rate = 3e-4
 
