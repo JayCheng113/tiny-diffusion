@@ -17,7 +17,6 @@ from model import (
     DiffusionConfig,
     encode_text,
     decode_tokens,
-    MaskedDiffusionSchedule,
 )
 
 
@@ -108,7 +107,7 @@ def load_initial_text(data_path, num_chars=1024):
 
 
 def generate_with_game_of_life(
-    model, initial_tokens, num_iterations=10, temperature=1.0
+    model, initial_tokens, num_iterations=10, temperature=1.0, method='confidence', confidence_threshold=0.5
 ):
     """
     Generate samples using Game of Life rules to determine masking
@@ -120,94 +119,77 @@ def generate_with_game_of_life(
         initial_tokens: Initial 1024 tokens (32x32 grid)
         num_iterations: Number of Game of Life iterations to run
         temperature: Sampling temperature
+        method: Decoding method
+        confidence_threshold: Confidence threshold for decoding
     """
     assert len(initial_tokens) == 1024, "initial_tokens must be 1024 for 32x32 grid"
 
     device = model.get_device()
     tokens = initial_tokens.to(device)
     seq_len = model.config.sequence_len
-    num_steps = model.config.diffusion_steps
 
-    # Create mask schedule
-    mask_schedule = MaskedDiffusionSchedule(
-        num_timesteps=model.config.diffusion_steps,
-        mask_token_id=model.config.mask_token_id,
-        context_len=model.config.context_len,
-    )
+    print(f"Pre-calculating {num_iterations} iterations with Game of Life dynamics using {method} decoding...")
 
-    print(f"Pre-calculating {num_iterations} iterations with Game of Life dynamics...")
-
-    # Convert to 32x32 grid with randomization for different initial patterns each time
-    # Add masks to tokens before computing binary grid
     random_offset = torch.randint(0, 256, (1024,), device=device)
     grid = ((tokens + random_offset) % 2).reshape(32, 32)
 
-    # Pre-calculate all frames
     all_frames = []
     all_masks = []
 
-    # Store initial state
     all_frames.append(tokens.clone())
     all_masks.append((grid == 1).flatten())
 
-    # Calculate all iterations
     for iteration in range(num_iterations):
         print(f"Calculating iteration {iteration + 1}/{num_iterations}...")
 
-        # Apply Game of Life rules to get next state (on 32x32 grid)
         next_grid = apply_game_of_life_rules(grid)
 
-        # Create mask: alive cells will be resampled
-        mask = (next_grid == 1).flatten()  # Shape: (1024,)
+        mask = (next_grid == 1).flatten()
 
-        # Process all 1024 tokens in chunks of 256
         updated_tokens = tokens.clone()
 
-        # Split into 4 chunks of 256 tokens each
         num_chunks = 1024 // seq_len
         for chunk_idx in range(num_chunks):
             start_idx = chunk_idx * seq_len
             end_idx = start_idx + seq_len
 
-            # Get chunk mask
             chunk_mask = mask[start_idx:end_idx]
 
-            # Only process if there are masked positions in this chunk
             if chunk_mask.any():
-                # Get chunk tokens
-                x = (
-                    updated_tokens[start_idx:end_idx].clone().unsqueeze(0)
-                )  # Shape: (1, 256)
+                x = updated_tokens[start_idx:end_idx].clone().unsqueeze(0)
 
-                # Denoise only the alive cells (chunk_mask positions)
+                masked_positions = chunk_mask.unsqueeze(0)
+
                 with torch.no_grad():
-                    for t in reversed(range(num_steps)):
-                        t_batch = torch.full((1,), t, device=device, dtype=torch.long)
+                    step = 0
+                    while masked_positions.any():
+                        t_batch = torch.full((1,), step, device=device, dtype=torch.long)
+                        t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
 
-                        # Create x_masked: mask token at alive cells, original elsewhere
                         x_masked = x.clone()
-                        x_masked[0, chunk_mask] = model.config.mask_token_id
+                        x_masked[0, masked_positions[0]] = model.config.mask_token_id
 
-                        # Predict clean tokens
                         logits = model.forward(x_masked, t_batch)
-
-                        # Sample from predicted distribution
                         probs = F.softmax(logits / temperature, dim=-1)
-                        x_new = torch.multinomial(
-                            probs.view(-1, model.config.vocab_size), num_samples=1
-                        ).view(1, seq_len)
+                        confidences, predicted_tokens = torch.max(probs, dim=-1)
 
-                        # Only update the alive cell positions
-                        x[0, chunk_mask] = x_new[0, chunk_mask]
+                        above_threshold = (confidences >= confidence_threshold) & masked_positions
 
-                # Update the chunk in the full token array
+                        if not above_threshold.any():
+                            masked_confidences = confidences.clone()
+                            masked_confidences[~masked_positions] = -float('inf')
+                            best_idx = torch.argmax(masked_confidences[0])
+                            above_threshold[0, best_idx] = True
+
+                        x = torch.where(above_threshold, predicted_tokens, x)
+                        masked_positions = masked_positions & ~above_threshold
+                        step += 1
+
                 updated_tokens[start_idx:end_idx] = x[0]
 
-        # Update state
         tokens = updated_tokens
         grid = next_grid
 
-        # Store frame
         all_frames.append(tokens.clone().cpu())
         all_masks.append(mask.cpu())
 

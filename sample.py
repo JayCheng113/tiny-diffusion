@@ -8,7 +8,6 @@ from model import (
     DiffusionConfig,
     decode_tokens,
     encode_text,
-    MaskedDiffusionSchedule,
 )
 
 
@@ -41,18 +40,27 @@ def load_model(checkpoint_path, device):
     return model
 
 
-def generate_samples(model, num_samples=5, temperature=1.0, dataset_tokens=None):
+def generate_samples(
+    model,
+    num_samples=5,
+    temperature=1.0,
+    dataset_tokens=None,
+    method="confidence",
+    k=None,
+    confidence_threshold=0.95,
+):
     """Generate text samples from the model"""
     device = model.get_device()
 
-    # Create mask schedule
-    mask_schedule = MaskedDiffusionSchedule(
-        num_timesteps=model.config.diffusion_steps,
-        mask_token_id=model.config.mask_token_id,
-        context_len=model.config.context_len,
-    )
+    method_desc = f"{method}"
+    if method == "topk":
+        if k is None:
+            k = max(1, model.config.sequence_len // 10)
+        method_desc += f" (K={k})"
+    elif method == "confidence":
+        method_desc += f" (τ={confidence_threshold})"
 
-    print(f"Generating {num_samples} samples with {model.config.diffusion_steps} denoising steps...\n")
+    print(f"Generating {num_samples} samples using {method_desc} decoding...\n")
 
     for i in range(num_samples):
         with torch.no_grad():
@@ -67,11 +75,13 @@ def generate_samples(model, num_samples=5, temperature=1.0, dataset_tokens=None)
             tokens = model.sample(
                 batch_size=1,
                 seq_len=model.config.sequence_len,
-                mask_schedule=mask_schedule,
                 num_steps=None,
                 temperature=temperature,
                 device=device,
                 context_tokens=context_tokens,
+                method=method,
+                k=k,
+                confidence_threshold=confidence_threshold,
             )
 
             # Decode tokens to text
@@ -83,7 +93,13 @@ def generate_samples(model, num_samples=5, temperature=1.0, dataset_tokens=None)
 
 
 def generate_continuous_blocks(
-    model, num_blocks=30, temperature=1.0, dataset_tokens=None
+    model,
+    num_blocks=30,
+    temperature=1.0,
+    dataset_tokens=None,
+    method="confidence",
+    k=None,
+    confidence_threshold=0.95,
 ):
     """
     Generate multiple blocks sequentially, where each block is conditioned on the
@@ -93,20 +109,23 @@ def generate_continuous_blocks(
         model: The trained diffusion model
         num_blocks: Number of blocks to generate
         temperature: Sampling temperature
+        dataset_tokens: Dataset tokens for context sampling
+        method: Decoding method - 'topk' or 'confidence'
+        k: Number of tokens per step (for 'topk' method)
+        confidence_threshold: Confidence threshold τ (for 'confidence' method)
     """
     device = model.get_device()
     context_len = model.config.context_len
 
-    # Create mask schedule
-    mask_schedule = MaskedDiffusionSchedule(
-        num_timesteps=model.config.diffusion_steps,
-        mask_token_id=model.config.mask_token_id,
-        context_len=model.config.context_len,
-    )
+    method_desc = f"{method}"
+    if method == "topk":
+        if k is None:
+            k = max(1, model.config.sequence_len // 10)
+        method_desc += f" (K={k})"
+    elif method == "confidence":
+        method_desc += f" (τ={confidence_threshold})"
 
-    print(
-        f"Generating {num_blocks} continuous blocks with {model.config.diffusion_steps} denoising steps..."
-    )
+    print(f"Generating {num_blocks} continuous blocks using {method_desc} decoding...")
     print(
         f"Each block conditions on the last {context_len} characters of the previous block\n"
     )
@@ -119,7 +138,9 @@ def generate_continuous_blocks(
             context_tokens = None
             if block_idx == 0 and dataset_tokens is not None:
                 # First block: use random context from dataset
-                context_tokens = get_random_context(dataset_tokens, context_len, batch_size=1)
+                context_tokens = get_random_context(
+                    dataset_tokens, context_len, batch_size=1
+                )
             elif block_idx > 0:
                 # Subsequent blocks: use last context_len tokens from previous block
                 context_tokens = prev_context.unsqueeze(0)
@@ -128,11 +149,13 @@ def generate_continuous_blocks(
             tokens = model.sample(
                 batch_size=1,
                 seq_len=model.config.sequence_len,
-                mask_schedule=mask_schedule,
                 num_steps=None,
                 temperature=temperature,
                 device=device,
                 context_tokens=context_tokens,
+                method=method,
+                k=k,
+                confidence_threshold=confidence_threshold,
             )
 
             # Store the last context_len tokens for next iteration
@@ -178,14 +201,29 @@ def main():
         dataset_tokens = load_dataset_text("data/tiny_shakespeare.txt")
         print(f"Loaded {len(dataset_tokens)} tokens from dataset\n")
 
+    # Sampling configuration
+    # method: 'confidence' or 'topk'
+    # For 'confidence': set confidence_threshold (0.0-1.0)
+    # For 'topk': set k (number of tokens per step)
+
+    method = "confidence"  # or 'topk'
+    # method = "topk"
+    confidence_threshold = 0.95  # for confidence method
+    k = 1  # for topk method (default is seq_len // 10)
+
     # Choose generation mode based on context_len
     if model.config.context_len > 0:
-        print(f"Using continuous block generation (context_len={model.config.context_len})\n")
+        print(
+            f"Using continuous block generation (context_len={model.config.context_len})\n"
+        )
         generate_continuous_blocks(
             model,
             num_blocks=30,
             temperature=1.0,
             dataset_tokens=dataset_tokens,
+            method=method,
+            k=k,
+            confidence_threshold=confidence_threshold,
         )
     else:
         print("Using independent sample generation (no context)\n")
@@ -194,6 +232,9 @@ def main():
             num_samples=5,
             temperature=1.0,
             dataset_tokens=dataset_tokens,
+            method=method,
+            k=k,
+            confidence_threshold=confidence_threshold,
         )
 
 

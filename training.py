@@ -125,11 +125,12 @@ def train(
                 samples = model.sample(
                     batch_size=1,
                     seq_len=model.config.sequence_len,
-                    mask_schedule=mask_schedule,
-                    num_steps=None,  # Use all timesteps
+                    num_steps=None,
                     temperature=1.0,
                     device=model.get_device(),
                     context_tokens=context_tokens,
+                    method='confidence',
+                    confidence_threshold=0.5,
                 )
                 # Decode samples to text
                 text = decode_tokens(samples[0])

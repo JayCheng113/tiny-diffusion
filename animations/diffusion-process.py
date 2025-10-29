@@ -18,7 +18,6 @@ from model import (
     DiffusionConfig,
     encode_text,
     decode_tokens,
-    MaskedDiffusionSchedule,
 )
 
 
@@ -40,7 +39,11 @@ def load_initial_context(data_path, context_len):
 
 
 def generate_with_visualization(
-    model, num_blocks=5, temperature=1.0, dataset_tokens=None
+    model,
+    num_blocks=5,
+    temperature=1.0,
+    dataset_tokens=None,
+    confidence_threshold=0.95,
 ):
     """
     Generate samples and visualize each denoising step
@@ -50,93 +53,81 @@ def generate_with_visualization(
         num_blocks: Number of blocks to generate
         temperature: Sampling temperature
         dataset_tokens: Dataset tokens for initial context (if context_len > 0)
+        confidence_threshold: Confidence threshold for decoding
     """
     device = model.get_device()
     seq_len = model.config.sequence_len
-    num_steps = model.config.diffusion_steps
     context_len = model.config.context_len
 
-    # Create mask schedule
-    mask_schedule = MaskedDiffusionSchedule(
-        num_timesteps=num_steps,
-        mask_token_id=model.config.mask_token_id,
-        context_len=context_len,
-    )
-
-    print(f"Generating {num_blocks} blocks with {num_steps} denoising steps each...")
+    print(f"Generating {num_blocks} blocks using confidence-aware decoding...")
     print(f"Context length: {context_len}")
     print()
 
-    # Pre-calculate all frames for all blocks
     all_frames = []
     all_masks = []
     all_block_indices = []
-    completed_blocks_text = []  # Cache decoded text for completed blocks
+    completed_blocks_text = []
 
     prev_context = None
 
     for block_idx in range(num_blocks):
         print(f"Pre-calculating block {block_idx + 1}/{num_blocks}...")
 
-        # Get context tokens for this block
         context_tokens = None
         if context_len > 0:
             if block_idx == 0 and dataset_tokens is not None:
-                # First block: use first context_len tokens from dataset
                 context_tokens = dataset_tokens[:context_len].unsqueeze(0).to(device)
             elif block_idx > 0 and prev_context is not None:
-                # Subsequent blocks: use last context_len tokens from previous block
                 context_tokens = prev_context.unsqueeze(0)
 
-        # Start from all mask tokens
         x = torch.full(
-            (1, seq_len),
-            model.config.mask_token_id,
-            dtype=torch.long,
-            device=device,
+            (1, seq_len), model.config.mask_token_id, dtype=torch.long, device=device
         )
 
-        # If context tokens provided, set them in the first context_len positions
         if context_tokens is not None:
             x[:, :context_len] = context_tokens
 
-        # Store initial state
         mask = torch.zeros(seq_len, dtype=torch.bool)
-        mask[context_len:] = True  # Everything except context is masked
+        mask[context_len:] = True
         all_frames.append(x[0].cpu().clone())
         all_masks.append(mask.cpu())
         all_block_indices.append(block_idx)
 
-        # Denoise step by step
+        masked_positions = torch.ones(1, seq_len, dtype=torch.bool, device=device)
+        if context_tokens is not None:
+            masked_positions[:, :context_len] = False
+
         with torch.no_grad():
-            for t in reversed(range(num_steps)):
-                # Apply masking for this timestep
-                t_batch = torch.full((1,), t, device=device, dtype=torch.long)
-                x_masked = mask_schedule.add_masks(x, t_batch)
+            step = 0
+            while masked_positions.any():
+                t_batch = torch.full((1,), step, device=device, dtype=torch.long)
+                t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
 
-                # Predict clean tokens
-                logits = model.forward(x_masked, t_batch)
-
-                # Sample from predicted distribution
+                logits = model.forward(x, t_batch)
                 probs = F.softmax(logits / temperature, dim=-1)
-                x_new = torch.multinomial(
-                    probs.view(-1, model.config.vocab_size), num_samples=1
-                ).view(1, seq_len)
+                confidences, predicted_tokens = torch.max(probs, dim=-1)
 
-                # Only update positions that were masked
-                mask_positions = x_masked == model.config.mask_token_id
-                x = torch.where(mask_positions, x_new, x)
+                above_threshold = (
+                    confidences >= confidence_threshold
+                ) & masked_positions
 
-                # Store frame (every frame)
+                if not above_threshold.any():
+                    masked_confidences = confidences.clone()
+                    masked_confidences[~masked_positions] = -float("inf")
+                    best_idx = torch.argmax(masked_confidences[0])
+                    above_threshold[0, best_idx] = True
+
+                x = torch.where(above_threshold, predicted_tokens, x)
+                masked_positions = masked_positions & ~above_threshold
+
                 all_frames.append(x[0].cpu().clone())
-                all_masks.append(mask_positions[0].cpu())
+                all_masks.append(masked_positions[0].cpu())
                 all_block_indices.append(block_idx)
+                step += 1
 
-        # Store the last context_len tokens for next iteration
         if context_len > 0:
             prev_context = x[0, -context_len:]
 
-        # Cache the decoded text for this completed block
         chars_per_row = 64
         num_rows = (seq_len + chars_per_row - 1) // chars_per_row
         block_lines = []
@@ -192,30 +183,18 @@ def generate_with_visualization(
         mask = all_masks[frame_idx]
         block_idx = all_block_indices[frame_idx]
 
-        # Calculate which step within the block we're at
-        frames_per_block = num_steps + 1
-        step_in_block = frame_idx % frames_per_block
-
-        # Build accumulated text from all completed blocks + current block
-        # Show only the last 5 blocks (sliding window)
         max_visible_blocks = 6
         all_lines = []
 
-        # Calculate which blocks to show
         start_block = max(0, block_idx - max_visible_blocks + 1)
 
-        # Add completed blocks in the visible window (use cached decoded text)
         for prev_block_idx in range(start_block, block_idx):
-            # Use pre-decoded text for this block
             block_text_lines = completed_blocks_text[prev_block_idx]
 
-            # For the first visible block, show all rows
-            # For subsequent blocks, skip the first row (context that overlaps with previous block's last row)
             start_row = 0 if prev_block_idx == start_block else 1
             for row_idx in range(start_row, num_rows):
                 all_lines.append(block_text_lines[row_idx])
 
-        # Add current block (skip first row if not the first visible block)
         start_row = 0 if block_idx == start_block else 1
         for row_idx in range(start_row, num_rows):
             start_idx = row_idx * chars_per_row
@@ -236,12 +215,10 @@ def generate_with_visualization(
         text_obj.set_text("\n".join(all_lines))
         text_obj.set_color("black")
 
-        if step_in_block == 0:
-            title_text = f"Block {block_idx + 1}/{num_blocks} - Initial (all masked except context)"
-        else:
-            title_text = (
-                f"Block {block_idx + 1}/{num_blocks} - Step {step_in_block}/{num_steps}"
-            )
+        num_masked = mask.sum().item()
+        title_text = (
+            f"Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens"
+        )
 
         title.set_text(title_text)
 
@@ -253,7 +230,7 @@ def generate_with_visualization(
         update,
         init_func=init,
         frames=len(all_frames),
-        interval=15,
+        interval=10,
         blit=False,
         repeat=True,
     )
@@ -290,9 +267,10 @@ def main():
     # Generate with visualization
     generate_with_visualization(
         model,
-        num_blocks=6,
-        temperature=0.1,
+        num_blocks=10,
+        temperature=1.0,
         dataset_tokens=dataset_tokens,
+        confidence_threshold=0.95,
     )
 
 

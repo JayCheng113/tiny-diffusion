@@ -210,23 +210,25 @@ class DiffusionTransformer(nn.Module):
         return logits
 
     @torch.inference_mode()
-    def sample(
+    def sample_topk(
         self,
         batch_size,
         seq_len,
-        mask_schedule,
+        k,
         num_steps=None,
         temperature=1.0,
         device=None,
         context_tokens=None,
     ):
         """
-        Generate samples using masked diffusion process
+        Generate samples using top-K parallel decoding (LLaDA baseline).
+        At each step, decode exactly K tokens with highest confidence.
+
         Args:
             batch_size: Number of samples to generate
             seq_len: Length of sequences to generate
-            mask_schedule: MaskedDiffusionSchedule instance
-            num_steps: Number of denoising steps (defaults to diffusion_steps)
+            k: Number of tokens to decode per step
+            num_steps: Maximum number of denoising steps
             temperature: Sampling temperature
             device: Device to generate on
             context_tokens: Optional context tokens for conditioning, shape (batch_size, context_len)
@@ -236,7 +238,7 @@ class DiffusionTransformer(nn.Module):
         if device is None:
             device = self.get_device()
         if num_steps is None:
-            num_steps = self.config.diffusion_steps
+            num_steps = seq_len  # Maximum possible steps
 
         # Start from all mask tokens
         x = torch.full(
@@ -251,26 +253,172 @@ class DiffusionTransformer(nn.Module):
             context_len = context_tokens.size(1)
             x[:, :context_len] = context_tokens.to(device)
 
-        # Denoise step by step
-        for t in reversed(range(num_steps)):
-            # Apply masking for this timestep
-            t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
-            x_masked = mask_schedule.add_masks(x, t_batch)
+        # Track which positions are still masked
+        masked_positions = torch.ones(batch_size, seq_len, dtype=torch.bool, device=device)
+        if context_tokens is not None:
+            masked_positions[:, :context_len] = False
 
-            # Predict clean tokens given masked input
-            logits = self.forward(x_masked, t_batch)
+        # Decode step by step
+        for step in range(num_steps):
+            # Check if all tokens are decoded
+            if not masked_positions.any():
+                break
 
-            # Sample from predicted distribution
+            # Create timestep (use step as proxy for timestep)
+            t_batch = torch.full((batch_size,), step, device=device, dtype=torch.long)
+            t_batch = torch.clamp(t_batch, 0, self.config.diffusion_steps - 1)
+
+            # Predict tokens
+            logits = self.forward(x, t_batch)
+
+            # Get confidence scores (max probability for each position)
             probs = F.softmax(logits / temperature, dim=-1)
-            x_new = torch.multinomial(
-                probs.view(-1, self.config.vocab_size), num_samples=1
-            ).view(batch_size, seq_len)
+            confidences, predicted_tokens = torch.max(probs, dim=-1)  # (B, T)
 
-            # Only update positions that were masked
-            mask = x_masked == self.config.mask_token_id
-            x = torch.where(mask, x_new, x)
+            # Mask out already-decoded positions
+            confidences = confidences.masked_fill(~masked_positions, -float('inf'))
+
+            # Select top-K positions per batch
+            k_actual = min(k, masked_positions.sum(dim=1).max().item())
+            _, topk_indices = torch.topk(confidences, k=k_actual, dim=1)  # (B, K)
+
+            # Update the top-K positions
+            for b in range(batch_size):
+                for idx in topk_indices[b]:
+                    if masked_positions[b, idx]:
+                        x[b, idx] = predicted_tokens[b, idx]
+                        masked_positions[b, idx] = False
 
         return x
+
+    @torch.inference_mode()
+    def sample_confidence(
+        self,
+        batch_size,
+        seq_len,
+        confidence_threshold=0.5,
+        num_steps=None,
+        temperature=1.0,
+        device=None,
+        context_tokens=None,
+    ):
+        """
+        Generate samples using confidence-aware parallel decoding (Fast-dLLM).
+        At each step, decode all tokens whose confidence exceeds a threshold.
+
+        Args:
+            batch_size: Number of samples to generate
+            seq_len: Length of sequences to generate
+            confidence_threshold: Threshold τ for token acceptance
+            num_steps: Maximum number of denoising steps
+            temperature: Sampling temperature
+            device: Device to generate on
+            context_tokens: Optional context tokens for conditioning, shape (batch_size, context_len)
+        Returns:
+            samples: Generated token sequences, shape (batch_size, seq_len)
+        """
+        if device is None:
+            device = self.get_device()
+        if num_steps is None:
+            num_steps = seq_len  # Maximum possible steps
+
+        # Start from all mask tokens
+        x = torch.full(
+            (batch_size, seq_len),
+            self.config.mask_token_id,
+            dtype=torch.long,
+            device=device,
+        )
+
+        # If context tokens provided, set them in the first context_len positions
+        if context_tokens is not None:
+            context_len = context_tokens.size(1)
+            x[:, :context_len] = context_tokens.to(device)
+
+        # Track which positions are still masked
+        masked_positions = torch.ones(batch_size, seq_len, dtype=torch.bool, device=device)
+        if context_tokens is not None:
+            masked_positions[:, :context_len] = False
+
+        # Decode step by step
+        for step in range(num_steps):
+            # Check if all tokens are decoded
+            if not masked_positions.any():
+                break
+
+            # Create timestep (use step as proxy for timestep)
+            t_batch = torch.full((batch_size,), step, device=device, dtype=torch.long)
+            t_batch = torch.clamp(t_batch, 0, self.config.diffusion_steps - 1)
+
+            # Predict tokens
+            logits = self.forward(x, t_batch)
+
+            # Get confidence scores (max probability for each position)
+            probs = F.softmax(logits / temperature, dim=-1)
+            confidences, predicted_tokens = torch.max(probs, dim=-1)  # (B, T)
+
+            # Select positions above threshold (only among masked positions)
+            above_threshold = (confidences >= confidence_threshold) & masked_positions
+
+            # Ensure at least one token is decoded per batch if any remain masked
+            for b in range(batch_size):
+                if masked_positions[b].any() and not above_threshold[b].any():
+                    # Decode the highest confidence masked token
+                    masked_confidences = confidences[b].clone()
+                    masked_confidences[~masked_positions[b]] = -float('inf')
+                    best_idx = torch.argmax(masked_confidences)
+                    above_threshold[b, best_idx] = True
+
+            # Update positions above threshold
+            x = torch.where(above_threshold, predicted_tokens, x)
+            masked_positions = masked_positions & ~above_threshold
+
+        return x
+
+    @torch.inference_mode()
+    def sample(
+        self,
+        batch_size,
+        seq_len,
+        mask_schedule=None,
+        num_steps=None,
+        temperature=1.0,
+        device=None,
+        context_tokens=None,
+        method='confidence',
+        k=None,
+        confidence_threshold=0.5,
+    ):
+        """
+        Generate samples using parallel decoding methods.
+
+        Args:
+            batch_size: Number of samples to generate
+            seq_len: Length of sequences to generate
+            mask_schedule: (deprecated) Not used in new methods
+            num_steps: Maximum number of denoising steps
+            temperature: Sampling temperature
+            device: Device to generate on
+            context_tokens: Optional context tokens for conditioning, shape (batch_size, context_len)
+            method: Decoding method - 'topk' or 'confidence'
+            k: Number of tokens per step (for 'topk' method)
+            confidence_threshold: Confidence threshold τ (for 'confidence' method)
+        Returns:
+            samples: Generated token sequences, shape (batch_size, seq_len)
+        """
+        if method == 'topk':
+            if k is None:
+                k = max(1, seq_len // 10)  # Default: decode 10% per step
+            return self.sample_topk(
+                batch_size, seq_len, k, num_steps, temperature, device, context_tokens
+            )
+        elif method == 'confidence':
+            return self.sample_confidence(
+                batch_size, seq_len, confidence_threshold, num_steps,
+                temperature, device, context_tokens
+            )
+        else:
+            raise ValueError(f"Unknown sampling method: {method}")
 
 
 class MaskedDiffusionSchedule:
