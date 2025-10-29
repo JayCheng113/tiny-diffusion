@@ -10,9 +10,54 @@ from model import (
     DiffusionConfig,
     encode_text,
     decode_tokens,
-    MaskedDiffusionSchedule,
 )
 from sample import get_random_context
+
+
+class MaskedDiffusionSchedule:
+    """
+    Masked diffusion schedule for discrete diffusion.
+    At each timestep, we have a probability of masking a token with [MASK].
+    """
+
+    def __init__(self, num_timesteps, mask_token_id, context_len=0):
+        self.num_timesteps = num_timesteps
+        self.mask_token_id = mask_token_id
+        self.context_len = context_len
+
+        # Linear schedule: probability of masking increases linearly
+        self.mask_probs = torch.linspace(1.0 / num_timesteps, 1.0, num_timesteps)
+
+    def add_masks(self, x_0, t):
+        """
+        Add masks to tokens x_0 at timestep
+        Args:
+            x_0: Clean tokens, shape (B, T)
+            t: Timestep indices, shape (B,)
+        Returns:
+            x_t: Masked tokens at timestep t
+        """
+        B, T = x_0.shape
+        device = x_0.device
+
+        # Get masking probability for each sample (index on CPU, then move to device)
+        mask_prob = self.mask_probs[t.cpu()].to(device)  # (B,)
+
+        # Create mask: which tokens to replace with [MASK]
+        mask = torch.rand(B, T, device=device) < mask_prob.unsqueeze(1)  # (B, T)
+
+        # Never mask the first context_len tokens
+        if self.context_len > 0:
+            mask[:, : self.context_len] = False
+
+        # Replace masked positions with mask token
+        x_t = torch.where(mask, self.mask_token_id, x_0)
+
+        return x_t
+
+    def get_mask_prob(self, t):
+        """Get the masking probability for timestep t"""
+        return self.mask_probs[t].item()
 
 
 def get_data_loader(data_path, batch_size, seq_len, device):
@@ -129,8 +174,8 @@ def train(
                     temperature=1.0,
                     device=model.get_device(),
                     context_tokens=context_tokens,
-                    method='confidence',
-                    confidence_threshold=0.5,
+                    method="confidence",
+                    confidence_threshold=0.95,
                 )
                 # Decode samples to text
                 text = decode_tokens(samples[0])

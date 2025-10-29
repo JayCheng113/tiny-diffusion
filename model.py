@@ -1,16 +1,19 @@
 # Heavily modified version of nanochat gpt.py to do diffusion
 # https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
+#
+# Config is based on hyperparameters from Karpathy's "Let's build GPT" video
+# https://github.com/karpathy/ng-video-lecture/blob/master/gpt.py
+#
+# Tokenizer is simple ascii mapping
 
 """
 Simple Character-Level Discrete Diffusion Transformer
-Notable features:
-- Bidirectional attention (no causal masking)
-- Time step conditioning for diffusion
-- Rotary embeddings for positional encoding
-- QK norm
-- relu^2 activation in MLP
-- RMSNorm with no learnable params
-- No bias in linear layers
+Major changes from nanochat/gpt.py:
+- Bidirectional attention instead of Causal (no kvcache)
+- Time step conditioning added (time embeddings)
+- Replace autoregressive generation with topk and confidence-aware parallel decoding
+- Removed MQA/GQA (n_kv_head), simplified to standard multi-head attention
+- Removed optimizer setup, FLOPs estimation, and embedding dtype casting
 """
 
 import math
@@ -30,7 +33,7 @@ class DiffusionConfig:
     n_head: int = 6
     n_embd: int = 384
     diffusion_steps: int = 128
-    context_len: int = 64  # Number of prefix tokens that are never masked
+    context_len: int = 16  # Number of prefix tokens that are never masked
 
 
 def norm(x):
@@ -254,7 +257,9 @@ class DiffusionTransformer(nn.Module):
             x[:, :context_len] = context_tokens.to(device)
 
         # Track which positions are still masked
-        masked_positions = torch.ones(batch_size, seq_len, dtype=torch.bool, device=device)
+        masked_positions = torch.ones(
+            batch_size, seq_len, dtype=torch.bool, device=device
+        )
         if context_tokens is not None:
             masked_positions[:, :context_len] = False
 
@@ -276,7 +281,7 @@ class DiffusionTransformer(nn.Module):
             confidences, predicted_tokens = torch.max(probs, dim=-1)  # (B, T)
 
             # Mask out already-decoded positions
-            confidences = confidences.masked_fill(~masked_positions, -float('inf'))
+            confidences = confidences.masked_fill(~masked_positions, -float("inf"))
 
             # Select top-K positions per batch
             k_actual = min(k, masked_positions.sum(dim=1).max().item())
@@ -296,7 +301,7 @@ class DiffusionTransformer(nn.Module):
         self,
         batch_size,
         seq_len,
-        confidence_threshold=0.5,
+        confidence_threshold=0.95,
         num_steps=None,
         temperature=1.0,
         device=None,
@@ -336,7 +341,9 @@ class DiffusionTransformer(nn.Module):
             x[:, :context_len] = context_tokens.to(device)
 
         # Track which positions are still masked
-        masked_positions = torch.ones(batch_size, seq_len, dtype=torch.bool, device=device)
+        masked_positions = torch.ones(
+            batch_size, seq_len, dtype=torch.bool, device=device
+        )
         if context_tokens is not None:
             masked_positions[:, :context_len] = False
 
@@ -365,7 +372,7 @@ class DiffusionTransformer(nn.Module):
                 if masked_positions[b].any() and not above_threshold[b].any():
                     # Decode the highest confidence masked token
                     masked_confidences = confidences[b].clone()
-                    masked_confidences[~masked_positions[b]] = -float('inf')
+                    masked_confidences[~masked_positions[b]] = -float("inf")
                     best_idx = torch.argmax(masked_confidences)
                     above_threshold[b, best_idx] = True
 
@@ -380,14 +387,13 @@ class DiffusionTransformer(nn.Module):
         self,
         batch_size,
         seq_len,
-        mask_schedule=None,
         num_steps=None,
         temperature=1.0,
         device=None,
         context_tokens=None,
-        method='confidence',
+        method="confidence",
         k=None,
-        confidence_threshold=0.5,
+        confidence_threshold=0.95,
     ):
         """
         Generate samples using parallel decoding methods.
@@ -395,7 +401,6 @@ class DiffusionTransformer(nn.Module):
         Args:
             batch_size: Number of samples to generate
             seq_len: Length of sequences to generate
-            mask_schedule: (deprecated) Not used in new methods
             num_steps: Maximum number of denoising steps
             temperature: Sampling temperature
             device: Device to generate on
@@ -406,65 +411,24 @@ class DiffusionTransformer(nn.Module):
         Returns:
             samples: Generated token sequences, shape (batch_size, seq_len)
         """
-        if method == 'topk':
+        if method == "topk":
             if k is None:
                 k = max(1, seq_len // 10)  # Default: decode 10% per step
             return self.sample_topk(
                 batch_size, seq_len, k, num_steps, temperature, device, context_tokens
             )
-        elif method == 'confidence':
+        elif method == "confidence":
             return self.sample_confidence(
-                batch_size, seq_len, confidence_threshold, num_steps,
-                temperature, device, context_tokens
+                batch_size,
+                seq_len,
+                confidence_threshold,
+                num_steps,
+                temperature,
+                device,
+                context_tokens,
             )
         else:
             raise ValueError(f"Unknown sampling method: {method}")
-
-
-class MaskedDiffusionSchedule:
-    """
-    Masked diffusion schedule for discrete diffusion.
-    At each timestep, we have a probability of masking a token with [MASK].
-    """
-
-    def __init__(self, num_timesteps, mask_token_id, context_len=0):
-        self.num_timesteps = num_timesteps
-        self.mask_token_id = mask_token_id
-        self.context_len = context_len
-
-        # Linear schedule: probability of masking increases linearly
-        self.mask_probs = torch.linspace(1.0 / num_timesteps, 1.0, num_timesteps)
-
-    def add_masks(self, x_0, t):
-        """
-        Add masks to tokens x_0 at timestep
-        Args:
-            x_0: Clean tokens, shape (B, T)
-            t: Timestep indices, shape (B,)
-        Returns:
-            x_t: Masked tokens at timestep t
-        """
-        B, T = x_0.shape
-        device = x_0.device
-
-        # Get masking probability for each sample (index on CPU, then move to device)
-        mask_prob = self.mask_probs[t.cpu()].to(device)  # (B,)
-
-        # Create mask: which tokens to replace with [MASK]
-        mask = torch.rand(B, T, device=device) < mask_prob.unsqueeze(1)  # (B, T)
-
-        # Never mask the first context_len tokens
-        if self.context_len > 0:
-            mask[:, : self.context_len] = False
-
-        # Replace masked positions with mask token
-        x_t = torch.where(mask, self.mask_token_id, x_0)
-
-        return x_t
-
-    def get_mask_prob(self, t):
-        """Get the masking probability for timestep t"""
-        return self.mask_probs[t].item()
 
 
 def encode_text(text):

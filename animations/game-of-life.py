@@ -107,7 +107,12 @@ def load_initial_text(data_path, num_chars=1024):
 
 
 def generate_with_game_of_life(
-    model, initial_tokens, num_iterations=10, temperature=1.0, method='confidence', confidence_threshold=0.5
+    model,
+    initial_tokens,
+    num_iterations=10,
+    temperature=1.0,
+    method="confidence",
+    confidence_threshold=0.95,
 ):
     """
     Generate samples using Game of Life rules to determine masking
@@ -128,7 +133,9 @@ def generate_with_game_of_life(
     tokens = initial_tokens.to(device)
     seq_len = model.config.sequence_len
 
-    print(f"Pre-calculating {num_iterations} iterations with Game of Life dynamics using {method} decoding...")
+    print(
+        f"Pre-calculating {num_iterations} iterations with Game of Life dynamics using {method} decoding..."
+    )
 
     random_offset = torch.randint(0, 256, (1024,), device=device)
     grid = ((tokens + random_offset) % 2).reshape(32, 32)
@@ -163,8 +170,12 @@ def generate_with_game_of_life(
                 with torch.no_grad():
                     step = 0
                     while masked_positions.any():
-                        t_batch = torch.full((1,), step, device=device, dtype=torch.long)
-                        t_batch = torch.clamp(t_batch, 0, model.config.diffusion_steps - 1)
+                        t_batch = torch.full(
+                            (1,), step, device=device, dtype=torch.long
+                        )
+                        t_batch = torch.clamp(
+                            t_batch, 0, model.config.diffusion_steps - 1
+                        )
 
                         x_masked = x.clone()
                         x_masked[0, masked_positions[0]] = model.config.mask_token_id
@@ -173,11 +184,13 @@ def generate_with_game_of_life(
                         probs = F.softmax(logits / temperature, dim=-1)
                         confidences, predicted_tokens = torch.max(probs, dim=-1)
 
-                        above_threshold = (confidences >= confidence_threshold) & masked_positions
+                        above_threshold = (
+                            confidences >= confidence_threshold
+                        ) & masked_positions
 
                         if not above_threshold.any():
                             masked_confidences = confidences.clone()
-                            masked_confidences[~masked_positions] = -float('inf')
+                            masked_confidences[~masked_positions] = -float("inf")
                             best_idx = torch.argmax(masked_confidences[0])
                             above_threshold[0, best_idx] = True
 
