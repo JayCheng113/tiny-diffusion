@@ -156,6 +156,7 @@ def generate_with_visualization(
     num_rows = (seq_len + chars_per_row - 1) // chars_per_row
 
     # Create text object
+    # Use left alignment but position it to center the 64-char block
     text_obj = ax.text(
         0.5,
         0.5,
@@ -166,6 +167,7 @@ def generate_with_visualization(
         family="monospace",
         fontweight="normal",
         linespacing=1.2,
+        multialignment="left",
     )
 
     title = fig.suptitle("", fontsize=12)
@@ -184,33 +186,39 @@ def generate_with_visualization(
         block_idx = all_block_indices[frame_idx]
 
         max_visible_blocks = 6
-        all_lines = []
 
         start_block = max(0, block_idx - max_visible_blocks + 1)
 
+        # Collect all text as one continuous stream
+        continuous_text = ""
+
+        # Add completed blocks
         for prev_block_idx in range(start_block, block_idx):
             block_text_lines = completed_blocks_text[prev_block_idx]
+            block_text = "".join(block_text_lines)
 
-            start_row = 0 if prev_block_idx == start_block else 1
-            for row_idx in range(start_row, num_rows):
-                all_lines.append(block_text_lines[row_idx])
+            if prev_block_idx == start_block:
+                # First visible block - show everything
+                continuous_text += block_text
+            else:
+                # Skip context_len characters
+                continuous_text += block_text[context_len:]
 
-        start_row = 0 if block_idx == start_block else 1
-        for row_idx in range(start_row, num_rows):
-            start_idx = row_idx * chars_per_row
-            end_idx = min(start_idx + chars_per_row, seq_len)
-            row_text = ""
+        # Add current block being generated
+        start_offset = 0 if block_idx == start_block else context_len
+        for idx in range(start_offset, seq_len):
+            if mask[idx]:
+                continuous_text += "█"
+            else:
+                char = decode_tokens([frame_tokens[idx]])
+                if char == "\n":
+                    char = "↵"
+                continuous_text += char
 
-            for idx in range(start_idx, end_idx):
-                if mask[idx]:
-                    row_text += "█"
-                else:
-                    char = decode_tokens([frame_tokens[idx]])
-                    if char == "\n":
-                        char = "↵"
-                    row_text += char
-
-            all_lines.append(row_text)
+        # Wrap at 64 characters per line
+        all_lines = []
+        for i in range(0, len(continuous_text), chars_per_row):
+            all_lines.append(continuous_text[i : i + chars_per_row])
 
         text_obj.set_text("\n".join(all_lines))
         text_obj.set_color("black")
@@ -267,7 +275,7 @@ def main():
     # Generate with visualization
     generate_with_visualization(
         model,
-        num_blocks=10,
+        num_blocks=6,
         temperature=1.0,
         dataset_tokens=dataset_tokens,
         confidence_threshold=0.9,
