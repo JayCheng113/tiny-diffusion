@@ -1,6 +1,6 @@
 # tiny-diffusion
 
-A character-level discrete diffusion transformer for text generation. The model is a heavily modified version of the [nanochat gpt](https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
+A character-level language diffusion model for text generation. The model is a modified version of the [nanochat gpt](https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
 ) implemenation and is trained on Tiny Shakespeare.
 
 ## Installation
