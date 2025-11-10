@@ -22,10 +22,10 @@ uv sync
 
 ## Quick Start
 
-The file `training.py` puts the weights in `weights/diffusion_model.pt`. The sample and animations files load the model from this file.
+The file `training.py` puts the weights in `weights/diffusion_model.pt`. The sample and animation files load the model from this file.
 
 ### Train Your Own Model
-Currently, the weights area already provided for you! It took me around half an hour to train this model for 20,000 steps on 4xA100s. But if you want to retrain the model again, run:
+Currently, the weights are already provided for you! It took me around half an hour to train this model for 20,000 steps on 4xA100s. But if you want to retrain the model again, run:
 
 ```bash
 # Train from scratch on Shakespeare
