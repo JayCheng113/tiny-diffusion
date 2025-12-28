@@ -348,7 +348,7 @@ class DiffusionTransformer(nn.Module):
             masked_positions[:, :context_len] = False
 
         # Decode step by step
-        for step in range(num_steps):
+        for step in range(num_steps - 1, -1, -1):
             # Check if all tokens are decoded
             if not masked_positions.any():
                 break

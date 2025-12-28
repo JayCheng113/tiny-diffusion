@@ -5,11 +5,12 @@ Training script for character-level discrete diffusion model
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
+
 from model import (
-    DiffusionTransformer,
     DiffusionConfig,
-    encode_text,
+    DiffusionTransformer,
     decode_tokens,
+    encode_text,
 )
 from sample import get_random_context
 
@@ -188,7 +189,7 @@ def train(
 def main():
     # Hyperparameters
     batch_size = 64
-    max_iters = 20000
+    max_iters = 5000
     eval_interval = 500
     learning_rate = 3e-4
 
