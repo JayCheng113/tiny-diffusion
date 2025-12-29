@@ -1,18 +1,16 @@
 # tiny-diffusion
 
-A character-level language diffusion model for text generation trained on Tiny Shakespeare. It has everything (model architecture, training, and generation) in `diffusion.py` in just 351 lines of code! It is only 10.7 million parameters, so you can also try it out locally!
+A character-level language diffusion model for text generation trained on Tiny Shakespeare, in 365 lines of code! It is only 10.7 million parameters, so you can also try it out locally!
 
 ![Demo](animations/animation.gif)
 
-It also contains a tiny gpt implementation, 'gpt.py', which is very similar to 'diffusion.py'. The model architecture has one line changed (`is_causal=False`), allowing the model to do bidirectional attention instead of causal attention. The `get_batch` and `generate` functions are also modified; the rest of the code (~80%) is exact same.
+This repo also contains a tiny gpt implementation in 313 lines of code. ~80% of the code between the two files are the exact same.
 
-This is `v2` of this project. It simplified the diffusion code from 955 lines to 351. To view the old version, fetch the `old` branch.
-
+> This is `v2` of this project, which simplified the diffusion code from ~1,000 lines to ~400, and slightly altered the architecture. To view the original version, view the `old` branch.
 
 ## Quick Start
 
 ### Installation
-
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -22,36 +20,35 @@ cd tiny-diffusion
 uv sync
 ```
 
-### Training
-
-Train the GPT model:
+### Fetch Model Weights
+To fetch the trained model weights for our `gpt` and `diffusion` implementations, run:
 ```bash
-uv run gpt.py --train
+mkdir -p weights && wget -P weights https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/{gpt,diffusion}.pt
 ```
-
-Train the diffusion model:
-```bash
-uv run diffusion.py --train
-```
-
-Both models train for 5000 iterations and save weights to the `weights/` directory.
 
 ### Generation
-
 Generate text with the trained models:
-
 ```bash
-# GPT (autoregressive)
-uv run gpt.py
-
 # Diffusion (parallel decoding)
 uv run diffusion.py
-```
 
-Both models use the first 16 characters of `data.txt` as the initial context.
+# GPT (autoregressive)
+uv run gpt.py
+```
+Both models use the first 16 characters of `data.txt` as the initial context. This a parameter for the `generate` function and can be changed.
+
+### Training
+To train both model from scratch, run:
+```bash
+uv run diffusion.py --train
+
+uv run gpt.py --train
+```
+The `gpt` model trains for 5000 iterations while the `diffusion` model trains for 10000. The weights are saved to the `weights/` directory.
+
+The reason why the diffusion model trains for twice as long is because half as many tokens count towards the loss during training (only masked tokens contribute to the loss).
 
 ### Visualization
-
 Visualize the generation process step-by-step:
 
 ```bash
@@ -83,20 +80,13 @@ uv run animations/visualize.py --blocks 10
 
 ### Key Modifications
 
-The diffusion model makes just **4 key changes** to the GPT architecture:
+The diffusion model makes **5 key changes** to the GPT architecture:
 
 1. **Add mask token** to vocabulary (`_`) for representing unknown tokens
 2. **Change attention** from causal to bidirectional (`is_causal=False`)
 3. **Change generation** from sequential to confidence-based parallel decoding
 4. **Change training objective** from next token prediction to unmasking
-
-### Implementation Details
-
-- **Architecture**: 6-layer transformer with 6 attention heads, 384 embedding dimensions
-- **Context length**: 256 tokens
-- **Training data**: Character-level tokenization on `data.txt`
-- **Optimizer**: AdamW with learning rate 3e-4
-- **Batch size**: 64 sequences
+5. **Only masked tokens** contribute to the loss during training
 
 
 ## License
