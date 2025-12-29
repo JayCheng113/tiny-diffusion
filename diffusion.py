@@ -71,8 +71,8 @@ def get_batch(split):
     mask = torch.rand(batch_size, block_size) < mask_probs
     x[mask] = mask_token_id
 
-    x, y = x.to(device), y.to(device)
-    return x, y
+    x, y, mask = x.to(device), y.to(device), mask.to(device)
+    return x, y, mask
 
 
 def norm(x):
@@ -197,7 +197,7 @@ class Model(nn.Module):
         )  # add batch and head dims
         return cos, sin
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, mask=None):
         B, T = idx.size()
 
         # Get embeddings
@@ -222,7 +222,14 @@ class Model(nn.Module):
             B, T, C = logits.shape
             logits_flat = logits.view(B * T, C)
             targets_flat = targets.view(B * T)
-            loss = F.cross_entropy(logits_flat, targets_flat)
+
+            # [NEW]: Only compute loss on masked tokens if mask is provided
+            if mask is not None:
+                mask_flat = mask.view(B * T)
+                loss = F.cross_entropy(logits_flat, targets_flat, reduction="none")
+                loss = (loss * mask_flat).sum() / mask_flat.sum()
+            else:
+                loss = F.cross_entropy(logits_flat, targets_flat)
 
         return logits, loss
 
@@ -292,8 +299,8 @@ def estimate_loss():
     for split in ["train", "val"]:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
-            _, loss = model(X, Y)
+            X, Y, M = get_batch(split)
+            _, loss = model(X, Y, M)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -334,10 +341,10 @@ if __name__ == "__main__":
                 print(f"Sample:\n{sample}\n")
 
             # sample a batch of data
-            xb, yb = get_batch("train")
+            xb, yb, mb = get_batch("train")
 
             # evaluate the loss
-            logits, loss = model(xb, yb)
+            logits, loss = model(xb, yb, mb)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
