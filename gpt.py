@@ -220,11 +220,7 @@ class Model(nn.Module):
 
 
 @torch.no_grad()
-def generate(
-    model,
-    max_new_tokens,
-    prompt_len=16,
-):
+def generate(model, max_new_tokens, prompt_len=16, greedy=False):
     # Start with first prompt_len tokens from data as context
     x = data[:prompt_len].unsqueeze(0).to(device)  # (1, prompt_len)
 
@@ -237,7 +233,11 @@ def generate(
         logits = logits[:, -1, :]  # becomes (B, C)
         probs = F.softmax(logits, dim=-1)  # (B, C)
         # sample from the distribution
-        next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+        next_token = (
+            torch.argmax(probs, dim=-1, keepdim=True)
+            if greedy
+            else torch.multinomial(probs, num_samples=1)
+        )  # (B, 1)
         # append sampled token to current context
         x = torch.cat((x, next_token), dim=1)  # (B, T+1)
 
@@ -308,6 +308,6 @@ if __name__ == "__main__":
 
     # generate from the model
     start = time.time()
-    output = generate(m, max_new_tokens=5000)
+    output = generate(m, max_new_tokens=2000)
     print(f"Total generation time: {time.time() - start:.2f} seconds")
     print(f"\nOutput:\n{output}")
