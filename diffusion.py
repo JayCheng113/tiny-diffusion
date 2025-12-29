@@ -236,7 +236,9 @@ class Model(nn.Module):
 
 # [NEW]: Change next-token-prediction to confidence-based parallel decoding
 @torch.no_grad()
-def generate(model, max_new_tokens, prompt_len=16, confidence_threshold=0.95, top_k=3):
+def generate(
+    model, max_new_tokens, prompt_len=16, temp=1.0, confidence_threshold=0.95, top_k=3
+):
     all_tokens = data[:prompt_len].tolist()
     total_steps = 0
 
@@ -259,7 +261,7 @@ def generate(model, max_new_tokens, prompt_len=16, confidence_threshold=0.95, to
 
             # Get predictions and confidences
             logits, _ = model(x)
-            probs = F.softmax(logits, dim=-1)
+            probs = F.softmax(logits / temp, dim=-1)
             top_k_probs, top_k_indices = torch.topk(probs, k=top_k, dim=-1)
             confidences = top_k_probs.sum(dim=-1)
 

@@ -220,7 +220,7 @@ class Model(nn.Module):
 
 
 @torch.no_grad()
-def generate(model, max_new_tokens, prompt_len=16, greedy=False):
+def generate(model, max_new_tokens, prompt_len=16, temp=1.0, greedy=False):
     # Start with first prompt_len tokens from data as context
     x = data[:prompt_len].unsqueeze(0).to(device)  # (1, prompt_len)
 
@@ -231,7 +231,7 @@ def generate(model, max_new_tokens, prompt_len=16, greedy=False):
         logits, _ = model(cur_context)
         # apply softmax to get probabilities on last token
         logits = logits[:, -1, :]  # becomes (B, C)
-        probs = F.softmax(logits, dim=-1)  # (B, C)
+        probs = F.softmax(logits / temp, dim=-1)  # (B, C)
         # sample from the distribution
         next_token = (
             torch.argmax(probs, dim=-1, keepdim=True)
