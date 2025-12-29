@@ -1,13 +1,15 @@
 # tiny-diffusion
 
-A character-level language diffusion model for text generation. The model is a modified version of the [nanochat gpt](https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
-) implementation and is trained on Tiny Shakespeare! It is only 10.7 million parameters, so you can try it out locally!
+A character-level language diffusion model for text generation trained on Tiny Shakespeare. It has everything (model architecture, training, and generation) in `diffusion.py` in just 351 lines of code! It is only 10.7 million parameters, so you can also try it out locally!
 
-![Demo](animations/animation.gif)
+It also contains a tiny gpt implementation, 'gpt.py', which is very similar to 'diffusion.py'. The model architecture has one line changed (`is_causal=False`), allowing the model to do bidirectional attention instead of causal attention. The `get_batch` and `generate` functions are also modified; the rest of the code (~80%) is exact same.
+
+This is `v2` of this project. It simplified the diffusion code from 955 lines to 351. To view the old version, fetch the `old` branch.
 
 
+## Quick Start
 
-## Installation
+### Installation
 
 ```bash
 # Clone the repository
@@ -18,71 +20,83 @@ cd tiny-diffusion
 uv sync
 ```
 
+### Training
 
+Train the GPT model:
+```bash
+uv run gpt.py --train
+```
 
-## Quick Start
+Train the diffusion model:
+```bash
+uv run diffusion.py --train
+```
 
-The file `training.py` puts the weights in `weights/diffusion_model.pt`. The sample and animation files load the model from this file.
+Both models train for 5000 iterations and save weights to the `weights/` directory.
 
-### Train Your Own Model
-Currently, the weights are already provided for you! It took me around half an hour to train this model for 20,000 steps on an A100. But if you want to retrain the model again, run:
+### Generation
+
+Generate text with the trained models:
 
 ```bash
-# Train from scratch on Shakespeare
-uv run training.py
+# GPT (autoregressive)
+uv run gpt.py
 
-# Training will save checkpoints to weights/diffusion_model.pt
+# Diffusion (parallel decoding)
+uv run diffusion.py
 ```
 
-### Generate Text
-To generate a continuous stream of output (currently 30 context lengths), run:
+Both models use the first 16 characters of `data.txt` as the initial context.
+
+### Visualization
+
+Visualize the generation process step-by-step:
 
 ```bash
-# Generate samples using the pre-trained model
-uv run sample.py
-```
+# Visualize diffusion model only
+uv run animations/visualize.py
 
-### Visualize the Diffusion Process
-To see the diffusion process as a nice animation, run:
+# Compare diffusion and GPT side-by-side
+uv run animations/visualize.py --compare
 
-```bash
-# Watch the denoising process step-by-step
-uv run animations/diffusion-process.py
-
-# See Game of Life-inspired sampling (fun little experiment)
-uv run animations/game-of-life.py
+# Generate more blocks
+uv run animations/visualize.py --blocks 10
 ```
 
 
+## How It Works
 
-## Default Config
+### GPT (Autoregressive)
+- Predicts the next token given all previous tokens
+- Uses **causal attention** (can only look at past tokens)
+- Generates text **sequentially** (one token at a time, left-to-right)
+- Training: minimize cross-entropy loss on next token prediction
 
-- **Parameters**: 10.7 million
-- **Layers**: 6
-- **Attention Heads**: 6
-- **Embedding Dim**: 384
-- **Sequence Length**: 256 characters
-- **Diffusion Steps**: 128
+### Diffusion (Non-Autoregressive)
+- Predicts original tokens given partially masked sequences
+- Uses **bidirectional attention** (can look at all tokens)
+- Generates text **in parallel** (multiple tokens per step, based on confidence)
+- Generates in blocks: fills in masked tokens iteratively, then moves to the next block
+- Training: minimize cross-entropy loss on denoising masked tokens
 
+### Key Modifications
 
+The diffusion model makes just **4 key changes** to the GPT architecture:
 
-## File Structure
+1. **Add mask token** to vocabulary (`_`) for representing unknown tokens
+2. **Change attention** from causal to bidirectional (`is_causal=False`)
+3. **Change generation** from sequential to confidence-based parallel decoding
+4. **Change training objective** from next token prediction to unmasking
 
-```
-tiny-diffusion/
-├── model.py                    # Core diffusion transformer
-├── training.py                 # Training script
-├── sample.py                   # Text generation
-├── data/
-│   └── tiny_shakespeare.txt    # Training data
-├── weights/
-│   └── diffusion_model.pt      # Pre-trained weights
-└── animations/
-    ├── diffusion-process.py    # Denoising visualization
-    └── game-of-life.py         # Game of Life sampling
-```
+### Implementation Details
 
+- **Architecture**: 6-layer transformer with 6 attention heads, 384 embedding dimensions
+- **Context length**: 256 tokens
+- **Training data**: Character-level tokenization on `data.txt`
+- **Optimizer**: AdamW with learning rate 3e-4
+- **Batch size**: 64 sequences
 
 
 ## License
+
 MIT
