@@ -22,7 +22,7 @@ def generate_diffusion_frames(
     model,
     num_blocks=5,
     prompt_len=16,
-    temp=0.7,
+    temp=0.8,
     confidence_threshold=0.95,
     top_k=2,
 ):
@@ -119,7 +119,7 @@ def generate_diffusion_frames(
     return all_frames
 
 
-def generate_gpt_output(model, max_new_tokens, prompt_len=16, temp=0.7):
+def generate_gpt_output(model, max_new_tokens, prompt_len=16, temp=0.8):
     """Generate full GPT output once"""
     device = next(model.parameters()).device
     block_size = gpt.block_size
@@ -161,7 +161,9 @@ def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
     title = fig.suptitle("", fontsize=12)
 
     def update(frame_idx):
-        frame_tokens, mask, block_idx = diffusion_frames[frame_idx]
+        # Use the last frame if we're in the pause period
+        actual_idx = min(frame_idx, len(diffusion_frames) - 1)
+        frame_tokens, mask, block_idx = diffusion_frames[actual_idx]
 
         text_chars = []
         for idx in range(len(frame_tokens)):
@@ -184,8 +186,12 @@ def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
 
         return [text_obj, title]
 
+    # Add pause frames at the end (50 frames = 500ms pause)
+    pause_frames = 50
+    total_frames = len(diffusion_frames) + pause_frames
+
     anim = FuncAnimation(
-        fig, update, frames=len(diffusion_frames), interval=10, blit=False, repeat=True
+        fig, update, frames=total_frames, interval=10, blit=False, repeat=True
     )
     plt.tight_layout()
     return anim
@@ -228,30 +234,31 @@ def animate_comparison(
 
     def update(frame_idx):
         # Update diffusion (top)
-        if frame_idx < len(diffusion_frames):
-            frame_tokens, mask, block_idx = diffusion_frames[frame_idx]
+        # Use the last frame if we're in the pause period
+        diffusion_idx = min(frame_idx, len(diffusion_frames) - 1)
+        frame_tokens, mask, block_idx = diffusion_frames[diffusion_idx]
 
-            text_chars = []
-            for idx in range(len(frame_tokens)):
-                char = diffusion.decode([frame_tokens[idx].item()])
-                if char == "\n":
-                    char = " "
-                text_chars.append("█" if mask[idx] else char)
+        text_chars = []
+        for idx in range(len(frame_tokens)):
+            char = diffusion.decode([frame_tokens[idx].item()])
+            if char == "\n":
+                char = " "
+            text_chars.append("█" if mask[idx] else char)
 
-            continuous_text = "".join(text_chars)
-            lines = [
-                continuous_text[i : i + chars_per_row]
-                for i in range(0, len(continuous_text), chars_per_row)
-            ]
-            text_obj1.set_text("\n".join(lines))
+        continuous_text = "".join(text_chars)
+        lines = [
+            continuous_text[i : i + chars_per_row]
+            for i in range(0, len(continuous_text), chars_per_row)
+        ]
+        text_obj1.set_text("\n".join(lines))
 
-            num_masked = mask.sum().item()
-            ax1.set_title(
-                f"Diffusion - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens",
-                fontsize=12,
-                pad=-20,
-                y=0.98,
-            )
+        num_masked = mask.sum().item()
+        ax1.set_title(
+            f"Diffusion - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens",
+            fontsize=12,
+            pad=-20,
+            y=0.98,
+        )
 
         # Update GPT (bottom) - show tokens one by one
         gpt_idx = min(frame_idx + prompt_len, len(gpt_tokens))
@@ -277,7 +284,10 @@ def animate_comparison(
 
         return [text_obj1, text_obj2]
 
-    max_frames = max(len(diffusion_frames), len(gpt_tokens) - prompt_len)
+    # Add pause frames at the end (50 frames = 500ms pause)
+    pause_frames = 50
+    max_frames = max(len(diffusion_frames), len(gpt_tokens) - prompt_len) + pause_frames
+
     anim = FuncAnimation(
         fig, update, frames=max_frames, interval=10, blit=False, repeat=True
     )

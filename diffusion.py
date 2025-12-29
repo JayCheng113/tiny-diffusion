@@ -359,7 +359,7 @@ if __name__ == "__main__":
     # generate from the model
     start = time.time()
     output = generate(
-        m, max_new_tokens=2000, temp=0.7, confidence_threshold=0.95, top_k=2
+        m, max_new_tokens=2000, temp=0.8, confidence_threshold=0.95, top_k=2
     )
     print(f"Total generation time: {time.time() - start:.2f} seconds")
     print(f"\nOutput:\n{output}")
