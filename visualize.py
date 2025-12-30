@@ -328,9 +328,7 @@ def main():
     print(f"Using device: {device}\n")
 
     # Load and generate diffusion
-    diffusion_path = os.path.join(
-        os.path.dirname(__file__), "..", "weights", "diffusion.pt"
-    )
+    diffusion_path = os.path.join(os.path.dirname(__file__), "weights", "diffusion.pt")
     print(f"Loading diffusion model from {diffusion_path}...")
     diffusion_model = diffusion.Model().to(device)
     diffusion_model.load_state_dict(torch.load(diffusion_path, map_location=device))
@@ -345,7 +343,7 @@ def main():
         max_new_tokens = args.blocks * (diffusion.block_size - args.prompt_len)
 
         # Load and generate GPT
-        gpt_path = os.path.join(os.path.dirname(__file__), "..", "weights", "gpt.pt")
+        gpt_path = os.path.join(os.path.dirname(__file__), "weights", "gpt.pt")
         print(f"Loading GPT model from {gpt_path}...")
         gpt_model = gpt.Model().to(device)
         gpt_model.load_state_dict(torch.load(gpt_path, map_location=device))

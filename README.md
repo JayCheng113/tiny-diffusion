@@ -8,21 +8,18 @@ This repo also contains a tiny gpt implementation in 313 lines of code. ~80% of 
 
 > This is `v2` of this project, which simplified the diffusion code from ~1,000 lines to ~400, and slightly altered the architecture. To view the original version, view the `old` branch.
 
+
 ## Quick Start
 
 ### Installation
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd tiny-diffusion
-
 # Install dependencies (Python 3.10+)
 uv sync
 
 # Download the dataset
 wget https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/data.txt
 
-# Download the trained model weights (if you don't want to train it)
+# Download the trained model weights (if you don't want to train it from scratch)
 mkdir -p weights && wget -P weights https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/{gpt,diffusion}.pt
 ```
 
@@ -41,26 +38,28 @@ Both models generate 2,000 characters by default and use the first 16 characters
 To train both models from scratch, run:
 
 ```bash
+# Train diffusion model
 uv run diffusion.py --train
 
+# Train GPT model
 uv run gpt.py --train
 ```
-The `gpt` model trains for 5000 iterations while the `diffusion` model trains for 10000. The weights are saved to the `weights/` directory.
+The `gpt` model trains for 5,000 iterations while the `diffusion` model trains for 10,000. The weights are saved to the `weights/` directory.
 
-The reason why the diffusion model trains for twice as long is because half as many tokens count towards the loss during training (only masked tokens contribute to the loss).
+The diffusion model trains for twice as long because half as many tokens count towards the loss during training (only masked tokens contribute to the loss).
 
 ### Visualization
 Visualize the generation process step-by-step:
 
 ```bash
 # Visualize diffusion model only
-uv run animations/visualize.py
+uv run visualize.py
 
 # Compare diffusion and GPT side-by-side
-uv run animations/visualize.py --compare
+uv run visualize.py --compare
 
 # Generate more blocks
-uv run animations/visualize.py --blocks 10
+uv run visualize.py --blocks 10
 ```
 
 
@@ -86,6 +85,14 @@ The diffusion model makes **5 key changes** to the GPT architecture:
 3. **Change generation** from sequential to confidence-based parallel decoding
 4. **Change training objective** from next token prediction to unmasking
 5. **Only masked tokens** contribute to the loss during training
+
+
+## Acknoledgements
+The code for both `gpt.py` and `diffusion` takes heavy inspiration from Andrej Karpathy's two implementations:
+- [nanochat GPT implementation](https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py)
+- ["Let's build GPT" video GPT implementation](https://github.com/karpathy/ng-video-lecture/blob/master/gpt.py)
+
+I combined them for own implemenation, `gpt.py`, which strikes a balance between simplicity and good generation quality. The `diffusion.py` file is a modified version of `gpt.py` with as few modifications as possible to get it to do language diffusion.
 
 
 ## License
