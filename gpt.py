@@ -24,6 +24,7 @@ eval_iters = 200
 n_embd = 384
 n_head = 6
 n_layer = 6
+head_dim = n_embd // n_head
 # ------------
 torch.manual_seed(1337)
 
@@ -86,8 +87,6 @@ def apply_rotary_emb(x, cos, sin):
 class MultiHeadAttention(nn.Module):
     def __init__(self):
         super().__init__()
-        self.head_dim = n_embd // n_head
-        assert n_embd % n_head == 0
         self.c_q = nn.Linear(n_embd, n_embd, bias=False)
         self.c_k = nn.Linear(n_embd, n_embd, bias=False)
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
@@ -97,9 +96,9 @@ class MultiHeadAttention(nn.Module):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
-        q = self.c_q(x).view(B, T, n_head, self.head_dim)
-        k = self.c_k(x).view(B, T, n_head, self.head_dim)
-        v = self.c_v(x).view(B, T, n_head, self.head_dim)
+        q = self.c_q(x).view(B, T, n_head, head_dim)
+        k = self.c_k(x).view(B, T, n_head, head_dim)
+        v = self.c_v(x).view(B, T, n_head, head_dim)
 
         # Apply Rotary Embeddings to queries and keys to get relative positional encoding
         cos, sin = cos_sin
@@ -154,8 +153,7 @@ class Model(nn.Module):
 
         # Rotary embeddings
         self.rotary_seq_len = block_size * 2
-        head_dim = n_embd // n_head
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len, head_dim)
+        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -175,7 +173,7 @@ class Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _precompute_rotary_embeddings(self, seq_len, head_dim, base=10000, device=None):
+    def _precompute_rotary_embeddings(self, seq_len, base=10000, device=None):
         if device is None:
             device = self.token_emb.weight.device
         channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
@@ -286,7 +284,8 @@ if __name__ == "__main__":
             if iter % eval_interval == 0 or iter == max_iters - 1:
                 losses = estimate_loss()
                 print(
-                    f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}, time {time.time() - start:.2f} seconds"
+                    f"step {iter}: train loss {losses['train']:.4f},"
+                    f"val loss {losses['val']:.4f}, time {time.time() - start:.2f} seconds"
                 )
                 # Generate a sample
                 sample = generate(m, max_new_tokens=240)
