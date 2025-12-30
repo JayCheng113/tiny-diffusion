@@ -2,7 +2,7 @@
 
 A character-level language diffusion model for text generation trained on Tiny Shakespeare, in 365 lines of code! It is only 10.7 million parameters, so you can also try it out locally!
 
-![Demo](animations/animation.gif)
+![Demo](https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/animation.gif)
 
 This repo also contains a tiny gpt implementation in 313 lines of code. ~80% of the code between the two files are the exact same.
 
@@ -18,11 +18,11 @@ cd tiny-diffusion
 
 # Install dependencies (Python 3.10+)
 uv sync
-```
 
-### Fetch Model Weights
-To fetch the trained model weights for our `gpt` and `diffusion` implementations, run:
-```bash
+# Download the dataset
+wget https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/data.txt
+
+# Download the trained model weights (if you don't want to train it)
 mkdir -p weights && wget -P weights https://github.com/nathan-barry/tiny-diffusion/releases/download/v2.0.0/{gpt,diffusion}.pt
 ```
 
@@ -39,6 +39,7 @@ Both models generate 2,000 characters by default and use the first 16 characters
 
 ### Training
 To train both models from scratch, run:
+
 ```bash
 uv run diffusion.py --train
 
