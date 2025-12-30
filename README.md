@@ -35,10 +35,10 @@ uv run diffusion.py
 # GPT (autoregressive)
 uv run gpt.py
 ```
-Both models use the first 16 characters of `data.txt` as the initial context. This a parameter for the `generate` function and can be changed.
+Both models generate 2,000 characters by default and use the first 16 characters of `data.txt` as the initial context. These are parameters in the `generate` function and can be easily modified.
 
 ### Training
-To train both model from scratch, run:
+To train both models from scratch, run:
 ```bash
 uv run diffusion.py --train
 
@@ -82,7 +82,7 @@ uv run animations/visualize.py --blocks 10
 
 The diffusion model makes **5 key changes** to the GPT architecture:
 
-1. **Add mask token** to vocabulary (`_`) for representing unknown tokens
+1. **Add mask token** to vocabulary (`_`) for representing noised tokens
 2. **Change attention** from causal to bidirectional (`is_causal=False`)
 3. **Change generation** from sequential to confidence-based parallel decoding
 4. **Change training objective** from next token prediction to unmasking
