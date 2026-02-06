@@ -4,6 +4,7 @@
 import os
 import sys
 import time
+import csv
 
 import torch
 import torch.nn as nn
@@ -327,28 +328,52 @@ if __name__ == "__main__":
 
         # create a PyTorch optimizer
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        os.makedirs("logs", exist_ok=True)
+        log_path = os.path.join(
+            "logs", f"diffusion_train_{time.strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        print(f"Training log: {log_path}")
 
         start = time.time()
-        for iter in range(max_iters):
-            # every once in a while evaluate the loss on train and val sets
-            if iter % eval_interval == 0 or iter == max_iters - 1:
-                losses = estimate_loss()
-                print(
-                    f"step {iter}: train loss {losses['train']:.4f},"
-                    f"val loss {losses['val']:.4f}, time {time.time() - start:.2f} seconds"
-                )
-                # Generate a sample
-                sample = generate(m, max_new_tokens=240)
-                print(f"Sample:\n{sample}\n")
+        last_batch_loss = float("nan")
+        with open(log_path, "w", newline="", encoding="utf-8") as log_file:
+            log_writer = csv.writer(log_file)
+            log_writer.writerow(
+                ["step", "elapsed_sec", "train_loss", "val_loss", "batch_total_loss"]
+            )
 
-            # sample a batch of data
-            xb, yb, mb = get_batch("train")
+            for iter in range(max_iters):
+                # every once in a while evaluate the loss on train and val sets
+                if iter % eval_interval == 0 or iter == max_iters - 1:
+                    losses = estimate_loss()
+                    elapsed = time.time() - start
+                    log_writer.writerow(
+                        [
+                            iter,
+                            f"{elapsed:.4f}",
+                            f"{losses['train']:.6f}",
+                            f"{losses['val']:.6f}",
+                            f"{last_batch_loss:.6f}",
+                        ]
+                    )
+                    log_file.flush()
+                    print(
+                        f"step {iter}: train loss {losses['train']:.4f},"
+                        f"val loss {losses['val']:.4f}, time {elapsed:.2f} seconds"
+                    )
+                    # Generate a sample
+                    sample = generate(m, max_new_tokens=240)
+                    print(f"Sample:\n{sample}\n")
 
-            # evaluate the loss
-            logits, loss = model(xb, yb, mb)
-            optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+                # sample a batch of data
+                xb, yb, mb = get_batch("train")
+
+                # evaluate the loss
+                logits, loss = model(xb, yb, mb)
+                last_batch_loss = loss.item()
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                optimizer.step()
 
         # Save the model weights
         print(f"Total training time: {time.time() - start:.2f} seconds")
