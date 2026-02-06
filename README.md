@@ -268,6 +268,25 @@ uv run analyze_generate_quality.py \
 
 输出到 `eval_generate_quality/`，包含 `diffusion_ab_summary.json`、`diffusion_ab_rows.json`。
 
+### 8) new_two_stage 参数网格 + baseline 对比
+
+```bash
+uv run sweep_new_two_stage_vs_baseline.py \
+  --module diffusion \
+  --weights weights/diffusion.pt \
+  --seeds 1337,2027,7,42,123 \
+  --sweep-draft-threshold 0.65,0.70,0.75 \
+  --sweep-confirm-threshold 0.85,0.88 \
+  --sweep-replace-margin 0.0,0.02,0.05 \
+  --sweep-target-chunk-len 240
+```
+
+输出到 `sweep_generate_reports/<module>_<timestamp>/`，包含：
+
+- `run_level.csv`：逐 seed 明细（new vs baseline）
+- `agg_vs_baseline.csv`：每组参数的均值差异汇总
+- `summary.json`：配置与 top5 参数
+
 ## 代码结构
 
 - `gpt.py`：自回归模型训练与生成
@@ -281,6 +300,7 @@ uv run analyze_generate_quality.py \
 - `run_inference_preset.py`：加载预设参数推理
 - `evaluate_generate_methods.py`：同权重下两种 generate 参数集 A/B 对比
 - `analyze_generate_quality.py`：对 A/B 生成结果做质量指标统计
+- `sweep_new_two_stage_vs_baseline.py`：new_two_stage 参数网格并和 baseline 对比
 
 ## 致谢
 
