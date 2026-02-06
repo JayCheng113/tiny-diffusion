@@ -1,0 +1,26 @@
+{
+  "flow_quality": {
+    "module": "diffusion_flow",
+    "max_new_tokens": 512,
+    "prompt_len": 16,
+    "temp": 0.8,
+    "confidence_threshold": 0.85,
+    "top_k": 3
+  },
+  "flow_balanced": {
+    "module": "diffusion_flow",
+    "max_new_tokens": 512,
+    "prompt_len": 16,
+    "temp": 0.8,
+    "confidence_threshold": 0.75,
+    "top_k": 3
+  },
+  "baseline_fast": {
+    "module": "diffusion",
+    "max_new_tokens": 512,
+    "prompt_len": 16,
+    "temp": 0.7,
+    "confidence_threshold": 0.75,
+    "top_k": 3
+  }
+}
