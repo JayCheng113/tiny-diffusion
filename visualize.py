@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 import diffusion
+import diffusion_flow
 import gpt
 
 
@@ -119,6 +120,100 @@ def generate_diffusion_frames(
     return all_frames
 
 
+def generate_flow_frames(
+    model,
+    num_blocks=5,
+    prompt_len=16,
+    temp=0.8,
+    confidence_threshold=0.95,
+    top_k=2,
+    flow_step=0.6,
+):
+    """
+    Generate samples and capture each decoding step for diffusion_flow model.
+    """
+    device = next(model.parameters()).device
+    block_size = diffusion_flow.block_size
+    mask_token_id = diffusion_flow.mask_token_id
+
+    print(f"Pre-calculating {num_blocks} blocks for flow diffusion...")
+
+    all_frames = []
+    all_tokens_history = diffusion_flow.data[:prompt_len].tolist()
+
+    def capture_frame(all_tokens_history, x, masked, block_idx):
+        full_tokens = torch.tensor(all_tokens_history, dtype=torch.long, device=device)
+        full_tokens = torch.cat(
+            [full_tokens, x[0, prompt_len : prompt_len + block_len]]
+        )
+        full_mask = torch.zeros(len(full_tokens), dtype=torch.bool, device=device)
+        full_mask[len(all_tokens_history) :] = masked[
+            0, prompt_len : prompt_len + block_len
+        ]
+        all_frames.append(
+            (full_tokens.cpu().clone(), full_mask.cpu().clone(), block_idx)
+        )
+
+    for block_idx in range(num_blocks):
+        max_new_tokens = 240
+        block_len = min(block_size - prompt_len, max_new_tokens)
+
+        x = torch.full((1, block_size), mask_token_id, dtype=torch.long, device=device)
+        x[0, :prompt_len] = torch.tensor(
+            all_tokens_history[-prompt_len:], device=device
+        )
+
+        masked = torch.zeros(1, block_size, dtype=torch.bool, device=device)
+        masked[0, prompt_len : prompt_len + block_len] = True
+
+        capture_frame(all_tokens_history, x, masked, block_idx)
+
+        while masked.any():
+            logits, _ = model(x)
+
+            current_state = model.token_emb(x)
+            remaining_ratio = masked.float().mean().item()
+            t_value = 1.0 - remaining_ratio
+            t_batch = torch.full((1,), t_value, device=device)
+            flow_v = model.forward_flow(current_state, t_batch)
+            refined_state = current_state + flow_step * flow_v
+
+            flow_logits = refined_state @ model.token_emb.weight.t()
+            flow_blend = min(0.8, 0.25 + 0.55 * remaining_ratio)
+            blended_logits = (1.0 - flow_blend) * logits + flow_blend * flow_logits
+
+            probs = F.softmax(blended_logits / temp, dim=-1)
+            top_k_probs, top_k_indices = torch.topk(probs, k=top_k, dim=-1)
+            confidences = top_k_probs.sum(dim=-1)
+
+            adaptive_threshold = max(
+                0.60, confidence_threshold - 0.25 * (1.0 - remaining_ratio)
+            )
+            decode_mask = (confidences >= adaptive_threshold) & masked
+            if not decode_mask.any():
+                masked_confidences = torch.where(
+                    masked, confidences, torch.tensor(-float("inf"), device=device)
+                )
+                decode_mask.view(-1)[masked_confidences.argmax()] = True
+
+            top_k_probs_norm = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
+            sampled_k = torch.multinomial(top_k_probs_norm.view(-1, top_k), 1).view(
+                1, block_size
+            )
+            sampled_tokens = torch.gather(
+                top_k_indices, -1, sampled_k.unsqueeze(-1)
+            ).squeeze(-1)
+
+            x = torch.where(decode_mask, sampled_tokens, x)
+            masked = masked & ~decode_mask
+            capture_frame(all_tokens_history, x, masked, block_idx)
+
+        all_tokens_history.extend(x[0, prompt_len : prompt_len + block_len].tolist())
+
+    print(f"Flow diffusion: Generated {len(all_frames)} frames")
+    return all_frames
+
+
 def generate_gpt_output(model, max_new_tokens, prompt_len=16, temp=0.8):
     """Generate full GPT output once"""
     device = next(model.parameters()).device
@@ -139,7 +234,9 @@ def generate_gpt_output(model, max_new_tokens, prompt_len=16, temp=0.8):
     return x[0].cpu()
 
 
-def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
+def animate_diffusion(
+    diffusion_frames, num_blocks, decode_fn=diffusion.decode, title_prefix="Diffusion", chars_per_row=64
+):
     """Create animation for diffusion model only"""
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.set_xlim(0, 1)
@@ -167,7 +264,7 @@ def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
 
         text_chars = []
         for idx in range(len(frame_tokens)):
-            char = diffusion.decode([frame_tokens[idx].item()])
+            char = decode_fn([frame_tokens[idx].item()])
             if char == "\n":
                 char = " "
             text_chars.append("█" if mask[idx] else char)
@@ -181,7 +278,7 @@ def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
 
         num_masked = mask.sum().item()
         title.set_text(
-            f"Diffusion - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens"
+            f"{title_prefix} - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens"
         )
 
         return [text_obj, title]
@@ -198,7 +295,13 @@ def animate_diffusion(diffusion_frames, num_blocks, chars_per_row=64):
 
 
 def animate_comparison(
-    diffusion_frames, gpt_tokens, num_blocks, prompt_len, chars_per_row=64
+    diffusion_frames,
+    gpt_tokens,
+    num_blocks,
+    prompt_len,
+    diffusion_decode_fn=diffusion.decode,
+    diffusion_title_prefix="Diffusion",
+    chars_per_row=64,
 ):
     """Create animation comparing diffusion and GPT"""
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
@@ -240,7 +343,7 @@ def animate_comparison(
 
         text_chars = []
         for idx in range(len(frame_tokens)):
-            char = diffusion.decode([frame_tokens[idx].item()])
+            char = diffusion_decode_fn([frame_tokens[idx].item()])
             if char == "\n":
                 char = " "
             text_chars.append("█" if mask[idx] else char)
@@ -254,7 +357,7 @@ def animate_comparison(
 
         num_masked = mask.sum().item()
         ax1.set_title(
-            f"Diffusion - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens",
+            f"{diffusion_title_prefix} - Block {block_idx + 1}/{num_blocks} - Remaining: {num_masked} tokens",
             fontsize=12,
             pad=-20,
             y=0.98,
@@ -304,6 +407,17 @@ def main():
         "--compare", action="store_true", help="Show both diffusion and GPT animations"
     )
     parser.add_argument(
+        "--flow",
+        action="store_true",
+        help="Visualize diffusion_flow model instead of diffusion baseline",
+    )
+    parser.add_argument(
+        "--flow-step",
+        type=float,
+        default=0.6,
+        help="Flow refinement step size for diffusion_flow visualization",
+    )
+    parser.add_argument(
         "--blocks",
         type=int,
         default=5,
@@ -327,20 +441,34 @@ def main():
     )
     print(f"Using device: {device}\n")
 
-    # Load and generate diffusion
-    diffusion_path = os.path.join(os.path.dirname(__file__), "weights", "diffusion.pt")
-    print(f"Loading diffusion model from {diffusion_path}...")
-    diffusion_model = diffusion.Model().to(device)
-    diffusion_model.load_state_dict(torch.load(diffusion_path, map_location=device))
-    diffusion_model.eval()
-
-    diffusion_frames = generate_diffusion_frames(
-        diffusion_model, args.blocks, args.prompt_len
-    )
+    # Load and generate diffusion variant
+    if args.flow:
+        model_path = os.path.join(os.path.dirname(__file__), "weights", "diffusion_flow.pt")
+        print(f"Loading flow diffusion model from {model_path}...")
+        diffusion_model = diffusion_flow.Model().to(device)
+        diffusion_model.load_state_dict(torch.load(model_path, map_location=device))
+        diffusion_model.eval()
+        diffusion_frames = generate_flow_frames(
+            diffusion_model, args.blocks, args.prompt_len, flow_step=args.flow_step
+        )
+        title_prefix = "Flow Diffusion"
+    else:
+        model_path = os.path.join(os.path.dirname(__file__), "weights", "diffusion.pt")
+        print(f"Loading diffusion model from {model_path}...")
+        diffusion_model = diffusion.Model().to(device)
+        diffusion_model.load_state_dict(torch.load(model_path, map_location=device))
+        diffusion_model.eval()
+        diffusion_frames = generate_diffusion_frames(
+            diffusion_model, args.blocks, args.prompt_len
+        )
+        title_prefix = "Diffusion"
 
     if args.compare:
         # Calculate how many tokens diffusion generates
-        max_new_tokens = args.blocks * (diffusion.block_size - args.prompt_len)
+        current_block_size = (
+            diffusion_flow.block_size if args.flow else diffusion.block_size
+        )
+        max_new_tokens = args.blocks * (current_block_size - args.prompt_len)
 
         # Load and generate GPT
         gpt_path = os.path.join(os.path.dirname(__file__), "weights", "gpt.pt")
@@ -352,12 +480,24 @@ def main():
         gpt_tokens = generate_gpt_output(gpt_model, max_new_tokens, args.prompt_len)
 
         print("Done! Showing comparison animation...\n")
+        decode_fn = diffusion_flow.decode if args.flow else diffusion.decode
         anim = animate_comparison(
-            diffusion_frames, gpt_tokens, args.blocks, args.prompt_len
+            diffusion_frames,
+            gpt_tokens,
+            args.blocks,
+            args.prompt_len,
+            diffusion_decode_fn=decode_fn,
+            diffusion_title_prefix=title_prefix,
         )
     else:
         print("Done! Showing diffusion animation...\n")
-        anim = animate_diffusion(diffusion_frames, args.blocks)
+        decode_fn = diffusion_flow.decode if args.flow else diffusion.decode
+        anim = animate_diffusion(
+            diffusion_frames,
+            args.blocks,
+            decode_fn=decode_fn,
+            title_prefix=title_prefix,
+        )
 
     plt.show()
 
