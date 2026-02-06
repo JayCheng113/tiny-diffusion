@@ -253,7 +253,7 @@ uv run evaluate_generate_methods.py \
   --b-draft-threshold 0.70 \
   --b-confirm-threshold 0.85 \
   --b-replace-margin 0.0 \
-  --b-target-chunk-len 16
+  --b-target-chunk-len 240
 ```
 
 输出到 `eval_generate_reports/<module>_<timestamp>/`，包含 `summary.json`、`results.json`、`results.csv`。

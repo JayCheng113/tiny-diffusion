@@ -37,7 +37,7 @@ def parse_args():
     parser.add_argument("--b-draft-threshold", type=float, default=0.70)
     parser.add_argument("--b-confirm-threshold", type=float, default=0.85)
     parser.add_argument("--b-replace-margin", type=float, default=0.0)
-    parser.add_argument("--b-target-chunk-len", type=int, default=16)
+    parser.add_argument("--b-target-chunk-len", type=int, default=240)
 
     parser.add_argument("--output-dir", default="eval_generate_reports")
     return parser.parse_args()
