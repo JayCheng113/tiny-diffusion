@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 
 import diffusion
 import diffusion_flow
@@ -439,6 +439,12 @@ def main():
         default=None,
         help="Optional output path to save animation (e.g. out.gif or out.mp4)",
     )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=24,
+        help="FPS for saved animation",
+    )
 
     args = parser.parse_args()
 
@@ -519,8 +525,23 @@ def main():
         save_path = args.save
         os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
         print(f"Saving animation to {save_path} ...")
-        anim.save(save_path)
-        print("Animation saved.")
+        ext = os.path.splitext(save_path)[1].lower()
+        if ext == ".gif":
+            writer = PillowWriter(fps=args.fps)
+            anim.save(save_path, writer=writer, dpi=120)
+        elif ext in {".mp4", ".m4v", ".mov"}:
+            writer = FFMpegWriter(fps=args.fps)
+            anim.save(save_path, writer=writer, dpi=120)
+        else:
+            # Default to Pillow GIF output when extension is unknown.
+            writer = PillowWriter(fps=args.fps)
+            anim.save(save_path, writer=writer, dpi=120)
+
+        file_size = os.path.getsize(save_path)
+        if file_size <= 0:
+            warnings.warn("Saved animation file is empty. Try --save out.gif and ensure pillow is installed.")
+        else:
+            print(f"Animation saved ({file_size} bytes).")
         return
 
     if is_headless:
