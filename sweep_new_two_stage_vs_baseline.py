@@ -1,5 +1,4 @@
 import argparse
-import csv
 import hashlib
 import importlib
 import itertools
@@ -10,6 +9,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import torch
 from inference_utils import parse_list, run_generate_with_capture, set_seed
 
@@ -35,7 +35,7 @@ def parse_args():
 
     # Sweep (new_two_stage) grid
     p.add_argument("--sweep-confidence-threshold", default="0.95")
-    p.add_argument("--sweep-draft-threshold", default="0.65,0.70,0.75")
+    p.add_argument("--sweep-draft-threshold", default="0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75")
     p.add_argument("--sweep-confirm-threshold", default="0.85,0.88")
     p.add_argument("--sweep-replace-margin", default="0.0,0.02,0.05")
     p.add_argument("--sweep-target-chunk-len", default="240")
@@ -107,6 +107,63 @@ def mean(values):
 def config_id(cfg):
     key = json.dumps(cfg, sort_keys=True)
     return hashlib.md5(key.encode("utf-8")).hexdigest()[:10]
+
+
+def draw_speed_vs_quality(agg_rows, out_path: Path):
+    xs = [r["delta_elapsed_sec_mean"] for r in agg_rows]
+    ys = [r["delta_distinct_2_mean"] for r in agg_rows]
+    cs = [r["delta_repeat_char_ratio_mean"] for r in agg_rows]
+    labels = [r["config_id"] for r in agg_rows]
+    plt.figure(figsize=(9, 6))
+    sc = plt.scatter(xs, ys, c=cs, cmap="coolwarm", s=80, alpha=0.9, edgecolors="k")
+    plt.axvline(0.0, linestyle="--", linewidth=1)
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    for i, lab in enumerate(labels[:8]):
+        plt.annotate(lab, (xs[i], ys[i]), fontsize=8, xytext=(5, 3), textcoords="offset points")
+    plt.xlabel("Delta Elapsed Seconds (new - baseline, lower is better)")
+    plt.ylabel("Delta Distinct-2 (new - baseline, higher is better)")
+    plt.title("Speed vs Quality (color: Delta Repeat-Char Ratio)")
+    cbar = plt.colorbar(sc)
+    cbar.set_label("Delta Repeat-Char Ratio (lower is better)")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+
+
+def draw_speed_vs_parallel(agg_rows, out_path: Path):
+    xs = [r["delta_elapsed_sec_mean"] for r in agg_rows]
+    ys = [r["delta_avg_decoded_per_step_mean"] for r in agg_rows]
+    labels = [r["config_id"] for r in agg_rows]
+    plt.figure(figsize=(9, 6))
+    plt.scatter(xs, ys, s=90, alpha=0.9, edgecolors="k")
+    plt.axvline(0.0, linestyle="--", linewidth=1)
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    for i, lab in enumerate(labels[:8]):
+        plt.annotate(lab, (xs[i], ys[i]), fontsize=8, xytext=(5, 3), textcoords="offset points")
+    plt.xlabel("Delta Elapsed Seconds (new - baseline, lower is better)")
+    plt.ylabel("Delta Avg Decoded per Step (higher is better)")
+    plt.title("Speed vs Parallel Decode")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+
+
+def draw_topk_speed_bars(agg_rows, out_path: Path, top_k: int = 8):
+    top = agg_rows[: min(top_k, len(agg_rows))]
+    labels = [
+        f"{r['config_id']}\n(d={r['draft_threshold']},c={r['confirm_threshold']},m={r['replace_margin']})"
+        for r in top
+    ]
+    values = [r["delta_elapsed_sec_mean"] for r in top]
+    plt.figure(figsize=(11, 6))
+    plt.bar(range(len(top)), values)
+    plt.axhline(0.0, linestyle="--", linewidth=1)
+    plt.xticks(range(len(top)), labels, rotation=25, ha="right")
+    plt.ylabel("Delta Elapsed Seconds (new - baseline)")
+    plt.title("Top Configs by Speed Gain")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
 
 
 def main():
@@ -231,19 +288,15 @@ def main():
     out_dir = Path(args.output_dir) / f"{args.module}_{ts}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    run_csv = out_dir / "run_level.csv"
-    agg_csv = out_dir / "agg_vs_baseline.csv"
+    run_json = out_dir / "run_level.json"
+    agg_json = out_dir / "agg_vs_baseline.json"
     summary_json = out_dir / "summary.json"
+    fig_speed_quality = out_dir / "speed_vs_quality.png"
+    fig_speed_parallel = out_dir / "speed_vs_parallel.png"
+    fig_top_speed = out_dir / "top_speed_configs.png"
 
-    with run_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(run_rows[0].keys()))
-        w.writeheader()
-        w.writerows(run_rows)
-
-    with agg_csv.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=list(agg_rows[0].keys()))
-        w.writeheader()
-        w.writerows(agg_rows)
+    run_json.write_text(json.dumps(run_rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    agg_json.write_text(json.dumps(agg_rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
     summary = {
         "config": vars(args),
@@ -252,11 +305,17 @@ def main():
         "top_5": agg_rows[:5],
     }
     summary_json.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    draw_speed_vs_quality(agg_rows, fig_speed_quality)
+    draw_speed_vs_parallel(agg_rows, fig_speed_parallel)
+    draw_topk_speed_bars(agg_rows, fig_top_speed, top_k=8)
 
     print(f"Saved sweep report to: {out_dir}")
-    print(f"- {run_csv.name}")
-    print(f"- {agg_csv.name}")
+    print(f"- {run_json.name}")
+    print(f"- {agg_json.name}")
     print(f"- {summary_json.name}")
+    print(f"- {fig_speed_quality.name}")
+    print(f"- {fig_speed_parallel.name}")
+    print(f"- {fig_top_speed.name}")
 
 
 if __name__ == "__main__":

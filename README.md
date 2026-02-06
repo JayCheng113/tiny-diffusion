@@ -275,7 +275,7 @@ uv run sweep_new_two_stage_vs_baseline.py \
   --module diffusion \
   --weights weights/diffusion.pt \
   --seeds 1337,2027,7,42,123 \
-  --sweep-draft-threshold 0.65,0.70,0.75 \
+  --sweep-draft-threshold 0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75 \
   --sweep-confirm-threshold 0.85,0.88 \
   --sweep-replace-margin 0.0,0.02,0.05 \
   --sweep-target-chunk-len 240
@@ -283,9 +283,12 @@ uv run sweep_new_two_stage_vs_baseline.py \
 
 输出到 `sweep_generate_reports/<module>_<timestamp>/`，包含：
 
-- `run_level.csv`：逐 seed 明细（new vs baseline）
-- `agg_vs_baseline.csv`：每组参数的均值差异汇总
+- `run_level.json`：逐 seed 明细（new vs baseline）
+- `agg_vs_baseline.json`：每组参数的均值差异汇总
 - `summary.json`：配置与 top5 参数
+- `speed_vs_quality.png`：速度-质量散点图
+- `speed_vs_parallel.png`：速度-并行度散点图
+- `top_speed_configs.png`：最快配置条形图
 
 ## 代码结构
 
