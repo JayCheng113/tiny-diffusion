@@ -35,7 +35,10 @@ flow_t_max = 0.98
 flow_huber_beta = 0.1
 max_grad_norm = 1.0
 flow_loss_interval = 2
-flow_train_stop_step = 4000
+flow_train_max_step = 6000
+flow_plateau_window = 100
+flow_plateau_patience = 3
+flow_plateau_rel_tol = 0.01
 flow_decode_ratio_threshold = 0.35
 flow_bottleneck_dim = 128
 # ------------
@@ -300,10 +303,8 @@ def compute_flow_loss(model, targets, mask=None):
     return (token_loss * mask_f).sum() / denom
 
 
-def get_flow_weight(step):
-    if not use_flow_loss:
-        return 0.0
-    if step >= flow_train_stop_step:
+def get_flow_weight(step, flow_active):
+    if not use_flow_loss or not flow_active:
         return 0.0
     if flow_warmup_steps <= 0:
         return lambda_flow
@@ -439,6 +440,11 @@ if __name__ == "__main__":
         last_batch_flow_loss = float("nan")
         last_flow_weight = 0.0
         last_grad_norm = float("nan")
+        flow_active = bool(use_flow_loss)
+        flow_stop_step = -1
+        flow_window_losses = []
+        flow_prev_window_mean = None
+        flow_plateau_count = 0
         with open(log_path, "w", newline="", encoding="utf-8") as log_file:
             log_writer = csv.writer(log_file)
             log_writer.writerow(
@@ -450,6 +456,7 @@ if __name__ == "__main__":
                     "batch_ce_loss",
                     "batch_flow_loss",
                     "flow_weight",
+                    "flow_active",
                     "batch_total_loss",
                     "grad_norm",
                 ]
@@ -469,6 +476,7 @@ if __name__ == "__main__":
                             f"{last_batch_ce_loss:.6f}",
                             f"{last_batch_flow_loss:.6f}",
                             f"{last_flow_weight:.6f}",
+                            int(flow_active),
                             f"{last_batch_total_loss:.6f}",
                             f"{last_grad_norm:.6f}",
                         ]
@@ -486,13 +494,45 @@ if __name__ == "__main__":
                 xb, yb, mb = get_batch("train")
 
                 # evaluate the loss
+                if flow_active and iter >= flow_train_max_step:
+                    flow_active = False
+                    flow_stop_step = iter
+                    print(
+                        f"Flow disabled at step {iter}: reached flow_train_max_step={flow_train_max_step}"
+                    )
+
                 logits, ce_loss = model(xb, yb, mb)
                 flow_loss_value = torch.tensor(0.0, device=ce_loss.device)
-                flow_weight = get_flow_weight(iter)
+                flow_weight = get_flow_weight(iter, flow_active)
                 total_loss = ce_loss
-                if flow_weight > 0.0 and (iter % flow_loss_interval == 0):
+                # Align flow-loss updates with pre-train-step logging:
+                # eval/log runs before step `iter`, and logs values from step `iter-1`.
+                # Using the last step in each interval avoids always logging zeros.
+                use_flow_step = ((iter + 1) % flow_loss_interval == 0)
+                if flow_weight > 0.0 and use_flow_step:
                     flow_loss_value = compute_flow_loss(model, yb, mb)
                     total_loss = ce_loss + flow_weight * flow_loss_value
+                    flow_loss_scalar = flow_loss_value.item()
+                    flow_window_losses.append(flow_loss_scalar)
+                    if len(flow_window_losses) >= flow_plateau_window:
+                        current_window_mean = sum(flow_window_losses) / len(flow_window_losses)
+                        if flow_prev_window_mean is not None:
+                            rel_improve = (
+                                flow_prev_window_mean - current_window_mean
+                            ) / max(abs(flow_prev_window_mean), 1e-8)
+                            if rel_improve < flow_plateau_rel_tol:
+                                flow_plateau_count += 1
+                            else:
+                                flow_plateau_count = 0
+                            if flow_plateau_count >= flow_plateau_patience:
+                                flow_active = False
+                                flow_stop_step = iter
+                                print(
+                                    f"Flow disabled at step {iter}: plateau detected "
+                                    f"(rel_improve={rel_improve:.4f}, tol={flow_plateau_rel_tol})"
+                                )
+                        flow_prev_window_mean = current_window_mean
+                        flow_window_losses = []
                 last_batch_ce_loss = ce_loss.item()
                 last_batch_flow_loss = flow_loss_value.item()
                 last_flow_weight = flow_weight
@@ -511,6 +551,11 @@ if __name__ == "__main__":
                 )
                 last_grad_norm = float(grad_norm)
                 optimizer.step()
+
+        if flow_stop_step >= 0:
+            print(f"Flow was turned off at step {flow_stop_step}.")
+        else:
+            print("Flow remained active for the entire run.")
 
         # Save the model weights
         print(f"Total training time: {time.time() - start:.2f} seconds")

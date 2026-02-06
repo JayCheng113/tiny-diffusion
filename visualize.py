@@ -6,17 +6,21 @@ Shows diffusion denoising and/or GPT autoregressive generation
 import sys
 import os
 import argparse
+import warnings
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import matplotlib
 from matplotlib.animation import FuncAnimation
 
 import diffusion
 import diffusion_flow
 import gpt
+
+_ANIM_REF = None
 
 
 def generate_diffusion_frames(
@@ -429,6 +433,12 @@ def main():
         default=16,
         help="Length of initial prompt (default: 16)",
     )
+    parser.add_argument(
+        "--save",
+        type=str,
+        default=None,
+        help="Optional output path to save animation (e.g. out.gif or out.mp4)",
+    )
 
     args = parser.parse_args()
 
@@ -498,6 +508,26 @@ def main():
             decode_fn=decode_fn,
             title_prefix=title_prefix,
         )
+
+    global _ANIM_REF
+    _ANIM_REF = anim  # keep a strong reference to avoid premature GC warnings
+
+    backend = matplotlib.get_backend().lower()
+    is_headless = backend.endswith("agg") or not os.environ.get("DISPLAY")
+
+    if args.save is not None:
+        save_path = args.save
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        print(f"Saving animation to {save_path} ...")
+        anim.save(save_path)
+        print("Animation saved.")
+        return
+
+    if is_headless:
+        warnings.warn(
+            "No interactive display detected. Use --save out.gif to render animation to file."
+        )
+        return
 
     plt.show()
 
