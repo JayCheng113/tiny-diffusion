@@ -235,6 +235,29 @@ uv run run_inference_preset.py --preset baseline_fast
 
 预设配置位于 `configs/inference_presets.json`。
 
+### 6) 同权重下两种 generate 逻辑 A/B 对比
+
+```bash
+uv run evaluate_generate_methods.py \
+  --module diffusion \
+  --weights weights/diffusion.pt \
+  --seeds 1337,2027,7,42,123 \
+  --a-name old_like \
+  --a-confidence-threshold 0.85 \
+  --a-draft-threshold 0.85 \
+  --a-confirm-threshold 0.85 \
+  --a-replace-margin 1.0 \
+  --a-target-chunk-len 240 \
+  --b-name new_two_stage \
+  --b-confidence-threshold 0.95 \
+  --b-draft-threshold 0.70 \
+  --b-confirm-threshold 0.85 \
+  --b-replace-margin 0.0 \
+  --b-target-chunk-len 16
+```
+
+输出到 `eval_generate_reports/<module>_<timestamp>/`，包含 `summary.json`、`results.json`、`results.csv`。
+
 ## 代码结构
 
 - `gpt.py`：自回归模型训练与生成
@@ -246,6 +269,7 @@ uv run run_inference_preset.py --preset baseline_fast
 - `analyze_inference_sweep.py`：sweep 统计分析与绘图
 - `plot_training_curves.py`：训练日志绘图
 - `run_inference_preset.py`：加载预设参数推理
+- `evaluate_generate_methods.py`：同权重下两种 generate 参数集 A/B 对比
 
 ## 致谢
 

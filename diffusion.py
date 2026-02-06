@@ -236,26 +236,50 @@ class Model(nn.Module):
 # [NEW]: Change next-token-prediction to confidence-based parallel decoding
 @torch.no_grad()
 def generate(
-    model, max_new_tokens, prompt_len=16, temp=1.0, confidence_threshold=0.95, top_k=3
+    model,
+    max_new_tokens,
+    prompt_len=16,
+    temp=1.0,
+    confidence_threshold=0.95,
+    top_k=3,
+    draft_threshold=0.70,
+    confirm_threshold=None,
+    replace_margin=0.0,
+    target_chunk_len=240,
 ):
+    if confirm_threshold is None:
+        confirm_threshold = confidence_threshold
+    if not (0.0 <= draft_threshold <= 1.0 and 0.0 <= confirm_threshold <= 1.0):
+        raise ValueError("draft_threshold and confirm_threshold must be in [0, 1]")
+    if draft_threshold > confirm_threshold:
+        raise ValueError("draft_threshold should be <= confirm_threshold")
+    if target_chunk_len <= 0:
+        raise ValueError("target_chunk_len must be > 0")
+
     all_tokens = data[:prompt_len].tolist()
     total_steps = 0
 
     # Generate one block at a time
     while len(all_tokens) - prompt_len < max_new_tokens:
         # How many tokens to generate this block
-        block_len = min(240, prompt_len + max_new_tokens - len(all_tokens))
+        block_len = min(target_chunk_len, prompt_len + max_new_tokens - len(all_tokens))
 
         # Initialize: last prompt_len tokens + masks
         x = torch.full((1, block_size), mask_token_id, dtype=torch.long, device=device)
         x[0, :prompt_len] = torch.tensor(all_tokens[-prompt_len:], device=device)
 
-        # Track which positions need decoding
-        masked = torch.zeros(1, block_size, dtype=torch.bool, device=device)
-        masked[0, prompt_len : prompt_len + block_len] = True
+        # Track decode states inside target region:
+        # pending: unseen positions, draft: provisional positions, confirmed: final positions.
+        target_mask = torch.zeros(1, block_size, dtype=torch.bool, device=device)
+        target_mask[0, prompt_len : prompt_len + block_len] = True
+        pending = target_mask.clone()
+        draft = torch.zeros_like(target_mask)
+        confirmed = torch.zeros_like(target_mask)
+        draft_conf = torch.full((1, block_size), -float("inf"), device=device)
 
-        # Iteratively decode
-        while masked.any():
+        # Iteratively decode with two thresholds:
+        # 1) low threshold for draft fill, 2) high threshold for final confirmation.
+        while confirmed.sum().item() < block_len:
             total_steps += 1
 
             # Get predictions and confidences
@@ -263,16 +287,6 @@ def generate(
             probs = F.softmax(logits / temp, dim=-1)
             top_k_probs, top_k_indices = torch.topk(probs, k=top_k, dim=-1)
             confidences = top_k_probs.sum(dim=-1)
-
-            # Decode high-confidence masked positions (or at least 1)
-            decode_mask = (confidences >= confidence_threshold) & masked
-            if not decode_mask.any():
-                masked_confidences = torch.where(
-                    masked, confidences, torch.tensor(-float("inf"))
-                )
-                decode_mask.view(-1)[masked_confidences.argmax()] = True
-
-            # Sample from top-k and update
             top_k_probs_norm = top_k_probs / top_k_probs.sum(dim=-1, keepdim=True)
             sampled_k = torch.multinomial(top_k_probs_norm.view(-1, top_k), 1).view(
                 1, block_size
@@ -281,8 +295,56 @@ def generate(
                 top_k_indices, -1, sampled_k.unsqueeze(-1)
             ).squeeze(-1)
 
-            x = torch.where(decode_mask, sampled_tokens, x)
-            masked = masked & ~decode_mask
+            # Confirm tokens whose current confidence is already high enough.
+            confirm_candidates = (pending | draft) & (confidences >= confirm_threshold)
+            confirm_candidates = confirm_candidates & target_mask
+            if confirm_candidates.any():
+                x = torch.where(confirm_candidates, sampled_tokens, x)
+                confirmed = confirmed | confirm_candidates
+                pending = pending & ~confirm_candidates
+                draft = draft & ~confirm_candidates
+
+            # Fill pending positions as drafts using the low threshold.
+            new_draft = pending & (confidences >= draft_threshold)
+            if new_draft.any():
+                x = torch.where(new_draft, sampled_tokens, x)
+                draft = draft | new_draft
+                pending = pending & ~new_draft
+                draft_conf = torch.where(new_draft, confidences, draft_conf)
+
+            # For draft positions, keep the token but allow replacement if confidence improves.
+            replace_candidates = (
+                draft
+                & (confidences >= draft_threshold)
+                & (confidences > (draft_conf + replace_margin))
+            )
+            if replace_candidates.any():
+                x = torch.where(replace_candidates, sampled_tokens, x)
+                draft_conf = torch.where(replace_candidates, confidences, draft_conf)
+
+            progressed = (
+                confirm_candidates.any() or new_draft.any() or replace_candidates.any()
+            )
+            if progressed:
+                continue
+
+            # Fallback:
+            # - if there are pending positions, force the best pending position into draft.
+            # - if only draft remains and no improvement happened, finalize drafts as-is.
+            if pending.any():
+                pending_conf = torch.where(
+                    pending, confidences, torch.full_like(confidences, -float("inf"))
+                )
+                forced = torch.zeros_like(pending)
+                forced.view(-1)[pending_conf.argmax()] = True
+                x = torch.where(forced, sampled_tokens, x)
+                draft = draft | forced
+                pending = pending & ~forced
+                draft_conf = torch.where(forced, confidences, draft_conf)
+            elif draft.any():
+                # No pending token left and drafts no longer improve: accept drafts.
+                confirmed = confirmed | draft
+                draft = torch.zeros_like(draft)
 
         # Extract and append generated tokens
         all_tokens.extend(x[0, prompt_len : prompt_len + block_len].tolist())
@@ -383,7 +445,14 @@ if __name__ == "__main__":
     # generate from the model
     start = time.time()
     output = generate(
-        m, max_new_tokens=2000, temp=0.8, confidence_threshold=0.95, top_k=2
+        m,
+        max_new_tokens=2000,
+        temp=0.8,
+        confidence_threshold=0.95,
+        top_k=2,
+        draft_threshold=0.70,
+        confirm_threshold=0.85,
+        target_chunk_len=240,
     )
     print(f"Total generation time: {time.time() - start:.2f} seconds")
     print(f"\nOutput:\n{output}")
