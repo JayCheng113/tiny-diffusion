@@ -1,18 +1,14 @@
 import argparse
-import contextlib
 import csv
 import importlib
-import io
 import itertools
 import json
 import os
-import random
-import re
-import time
 from datetime import datetime
 from pathlib import Path
 
 import torch
+from inference_utils import parse_list, run_generate_with_capture, set_seed
 
 
 def parse_args():
@@ -34,29 +30,6 @@ def parse_args():
     )
     parser.add_argument("--output-dir", default="infer_reports")
     return parser.parse_args()
-
-
-def parse_list(raw, fn):
-    return [fn(x.strip()) for x in raw.split(",") if x.strip()]
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def parse_generate_stdout(raw: str):
-    total_steps = -1
-    avg_decoded = -1.0
-    m_steps = re.search(r"Total steps:\s*(\d+)", raw)
-    if m_steps:
-        total_steps = int(m_steps.group(1))
-    m_avg = re.search(r"Avg decoded per step:\s*([0-9]*\.?[0-9]+)", raw)
-    if m_avg:
-        avg_decoded = float(m_avg.group(1))
-    return total_steps, avg_decoded
 
 
 def supports_flow_step(module):
@@ -149,12 +122,9 @@ def main():
             if has_flow_step and flow_step is not None:
                 kwargs["flow_step"] = flow_step
 
-            buf = io.StringIO()
-            start = time.perf_counter()
-            with contextlib.redirect_stdout(buf):
-                text = module.generate(model, **kwargs)
-            elapsed = time.perf_counter() - start
-            total_steps, avg_decoded = parse_generate_stdout(buf.getvalue())
+            text, elapsed, total_steps, avg_decoded, _ = run_generate_with_capture(
+                module, model, **kwargs
+            )
 
             row = {
                 "module": args.module,

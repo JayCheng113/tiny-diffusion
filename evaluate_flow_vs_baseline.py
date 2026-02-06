@@ -1,18 +1,15 @@
 import argparse
-import contextlib
 import csv
 import importlib
-import io
 import json
 import random
-import re
 import statistics
-import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import torch
+from inference_utils import run_generate_with_capture, set_seed
 
 
 @dataclass
@@ -47,13 +44,6 @@ def parse_args():
     parser.add_argument("--seeds", default="1337,2027,7")
     parser.add_argument("--output-dir", default="eval_reports")
     return parser.parse_args()
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
 
 
 def load_module(module_name: str):
@@ -91,18 +81,6 @@ def eval_val_loss(module, model, eval_batches: int, eval_batch_size: int):
     }
 
 
-def parse_generate_stdout(raw: str):
-    total_steps = -1
-    avg_decoded = -1.0
-    m_steps = re.search(r"Total steps:\s*(\d+)", raw)
-    if m_steps:
-        total_steps = int(m_steps.group(1))
-    m_avg = re.search(r"Avg decoded per step:\s*([0-9]*\.?[0-9]+)", raw)
-    if m_avg:
-        avg_decoded = float(m_avg.group(1))
-    return total_steps, avg_decoded
-
-
 def text_metrics(text: str):
     n = len(text)
     if n == 0:
@@ -132,20 +110,15 @@ def text_metrics(text: str):
 
 def run_generate(module, model, seed: int, args):
     set_seed(seed)
-    buf = io.StringIO()
-    start = time.perf_counter()
-    with contextlib.redirect_stdout(buf):
-        text = module.generate(
-            model,
-            max_new_tokens=args.max_new_tokens,
-            prompt_len=args.prompt_len,
-            temp=args.temp,
-            confidence_threshold=args.confidence_threshold,
-            top_k=args.top_k,
-        )
-    elapsed = time.perf_counter() - start
-    raw_stdout = buf.getvalue()
-    steps, avg_decoded = parse_generate_stdout(raw_stdout)
+    text, elapsed, steps, avg_decoded, _ = run_generate_with_capture(
+        module,
+        model,
+        max_new_tokens=args.max_new_tokens,
+        prompt_len=args.prompt_len,
+        temp=args.temp,
+        confidence_threshold=args.confidence_threshold,
+        top_k=args.top_k,
+    )
     tm = text_metrics(text)
     return SampleMetrics(
         seed=seed,

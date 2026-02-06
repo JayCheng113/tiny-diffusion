@@ -2,12 +2,14 @@ import argparse
 import importlib
 import json
 import os
-import random
-import re
-import time
 from pathlib import Path
 
 import torch
+from inference_utils import (
+    default_weights_for_module,
+    run_generate_with_capture,
+    set_seed,
+)
 
 
 def parse_args():
@@ -25,33 +27,6 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, default=1337)
     return parser.parse_args()
-
-
-def set_seed(seed: int):
-    random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-
-
-def parse_generate_stdout(raw: str):
-    total_steps = -1
-    avg_decoded = -1.0
-    m_steps = re.search(r"Total steps:\s*(\d+)", raw)
-    if m_steps:
-        total_steps = int(m_steps.group(1))
-    m_avg = re.search(r"Avg decoded per step:\s*([0-9]*\.?[0-9]+)", raw)
-    if m_avg:
-        avg_decoded = float(m_avg.group(1))
-    return total_steps, avg_decoded
-
-
-def default_weights_for_module(module_name: str):
-    if module_name == "diffusion":
-        return "weights/diffusion.pt"
-    if module_name == "diffusion_flow":
-        return "weights/diffusion_flow.pt"
-    return f"weights/{module_name}.pt"
 
 
 def main():
@@ -90,16 +65,9 @@ def main():
     print(f"Seed: {args.seed}")
     print(f"Params: {kwargs}")
 
-    import io
-    import contextlib
-
-    buf = io.StringIO()
-    start = time.perf_counter()
-    with contextlib.redirect_stdout(buf):
-        text = module.generate(model, **kwargs)
-    elapsed = time.perf_counter() - start
-    gen_stdout = buf.getvalue()
-    total_steps, avg_decoded = parse_generate_stdout(gen_stdout)
+    text, elapsed, total_steps, avg_decoded, _ = run_generate_with_capture(
+        module, model, **kwargs
+    )
 
     print(f"Elapsed: {elapsed:.4f}s")
     if total_steps >= 0:
