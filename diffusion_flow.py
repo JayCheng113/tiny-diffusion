@@ -29,6 +29,11 @@ head_dim = n_embd // n_head
 use_flow_loss = True
 lambda_flow = 0.1
 flow_noise_scale = 1.0
+flow_warmup_steps = 1000
+flow_t_min = 0.02
+flow_t_max = 0.98
+flow_huber_beta = 0.1
+max_grad_norm = 1.0
 # ------------
 torch.manual_seed(1337)
 
@@ -261,19 +266,31 @@ def compute_flow_loss(model, targets, mask=None):
         x0 = model.token_emb(targets)
         x1 = torch.randn_like(x0) * flow_noise_scale
         t = torch.rand(targets.size(0), device=targets.device)
+        t = flow_t_min + (flow_t_max - flow_t_min) * t
         t_view = t.view(-1, 1, 1)
         x_t = (1.0 - t_view) * x1 + t_view * x0
         target_v = x0 - x1
 
     pred_v = model.forward_flow(x_t, t)
-    token_mse = (pred_v - target_v).pow(2).mean(dim=-1)  # (B, T)
+    token_loss = F.smooth_l1_loss(
+        pred_v, target_v, reduction="none", beta=flow_huber_beta
+    ).mean(dim=-1)  # (B, T)
 
     if mask is None:
-        return token_mse.mean()
+        return token_loss.mean()
 
     mask_f = mask.float()
     denom = mask_f.sum().clamp_min(1.0)
-    return (token_mse * mask_f).sum() / denom
+    return (token_loss * mask_f).sum() / denom
+
+
+def get_flow_weight(step):
+    if not use_flow_loss:
+        return 0.0
+    if flow_warmup_steps <= 0:
+        return lambda_flow
+    warmup_ratio = min(1.0, float(step + 1) / float(flow_warmup_steps))
+    return lambda_flow * warmup_ratio
 
 
 # [NEW]: Change next-token-prediction to confidence-based parallel decoding
@@ -404,6 +421,8 @@ if __name__ == "__main__":
         last_batch_total_loss = float("nan")
         last_batch_ce_loss = float("nan")
         last_batch_flow_loss = float("nan")
+        last_flow_weight = 0.0
+        last_grad_norm = float("nan")
         with open(log_path, "w", newline="", encoding="utf-8") as log_file:
             log_writer = csv.writer(log_file)
             log_writer.writerow(
@@ -414,7 +433,9 @@ if __name__ == "__main__":
                     "val_loss",
                     "batch_ce_loss",
                     "batch_flow_loss",
+                    "flow_weight",
                     "batch_total_loss",
+                    "grad_norm",
                 ]
             )
 
@@ -431,7 +452,9 @@ if __name__ == "__main__":
                             f"{losses['val']:.6f}",
                             f"{last_batch_ce_loss:.6f}",
                             f"{last_batch_flow_loss:.6f}",
+                            f"{last_flow_weight:.6f}",
                             f"{last_batch_total_loss:.6f}",
+                            f"{last_grad_norm:.6f}",
                         ]
                     )
                     log_file.flush()
@@ -449,15 +472,28 @@ if __name__ == "__main__":
                 # evaluate the loss
                 logits, ce_loss = model(xb, yb, mb)
                 flow_loss_value = torch.tensor(0.0, device=ce_loss.device)
+                flow_weight = get_flow_weight(iter)
                 total_loss = ce_loss
-                if use_flow_loss:
+                if flow_weight > 0.0:
                     flow_loss_value = compute_flow_loss(model, yb, mb)
-                    total_loss = ce_loss + lambda_flow * flow_loss_value
+                    total_loss = ce_loss + flow_weight * flow_loss_value
                 last_batch_ce_loss = ce_loss.item()
                 last_batch_flow_loss = flow_loss_value.item()
+                last_flow_weight = flow_weight
                 last_batch_total_loss = total_loss.item()
+                if not torch.isfinite(total_loss):
+                    print(
+                        f"Skipping step {iter}: non-finite loss "
+                        f"(ce={last_batch_ce_loss:.4f}, flow={last_batch_flow_loss:.4f})"
+                    )
+                    optimizer.zero_grad(set_to_none=True)
+                    continue
                 optimizer.zero_grad(set_to_none=True)
                 total_loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), max_grad_norm
+                )
+                last_grad_norm = float(grad_norm)
                 optimizer.step()
 
         # Save the model weights
