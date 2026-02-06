@@ -258,6 +258,16 @@ uv run evaluate_generate_methods.py \
 
 输出到 `eval_generate_reports/<module>_<timestamp>/`，包含 `summary.json`、`results.json`、`results.csv`。
 
+### 7) generate A/B 结果质量检查
+
+```bash
+uv run analyze_generate_quality.py \
+  --input eval_generate_reports/diffusion_xxx/results.json \
+  --tag diffusion_ab
+```
+
+输出到 `eval_generate_quality/`，包含 `diffusion_ab_summary.json`、`diffusion_ab_rows.json`。
+
 ## 代码结构
 
 - `gpt.py`：自回归模型训练与生成
@@ -270,6 +280,7 @@ uv run evaluate_generate_methods.py \
 - `plot_training_curves.py`：训练日志绘图
 - `run_inference_preset.py`：加载预设参数推理
 - `evaluate_generate_methods.py`：同权重下两种 generate 参数集 A/B 对比
+- `analyze_generate_quality.py`：对 A/B 生成结果做质量指标统计
 
 ## 致谢
 
