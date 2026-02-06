@@ -34,6 +34,10 @@ flow_t_min = 0.02
 flow_t_max = 0.98
 flow_huber_beta = 0.1
 max_grad_norm = 1.0
+flow_loss_interval = 2
+flow_train_stop_step = 4000
+flow_decode_ratio_threshold = 0.35
+flow_bottleneck_dim = 128
 # ------------
 torch.manual_seed(1337)
 
@@ -179,7 +183,11 @@ class Model(nn.Module):
 
         # Output head to predict denoised tokens
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
-        self.flow_head = nn.Linear(n_embd, n_embd, bias=False)
+        self.flow_head = nn.Sequential(
+            nn.Linear(n_embd, flow_bottleneck_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(flow_bottleneck_dim, n_embd, bias=False),
+        )
         self.t_mlp = nn.Sequential(
             nn.Linear(1, n_embd, bias=True),
             nn.SiLU(),
@@ -235,6 +243,14 @@ class Model(nn.Module):
         v = self.flow_head(h + t_emb)
         return v
 
+    def forward_with_flow_tokens(self, idx, t):
+        # Single-pass helper for generation: returns both logits and flow velocity.
+        h = self.encode_hidden(idx)
+        logits = self.lm_head(h)
+        t_emb = self.t_mlp(t.unsqueeze(-1)).unsqueeze(1)  # (B, 1, n_embd)
+        v = self.flow_head(h + t_emb)
+        return logits, v
+
     def forward(self, idx, targets=None, mask=None):
         # Get embeddings
         x = self.encode_hidden(idx)
@@ -287,6 +303,8 @@ def compute_flow_loss(model, targets, mask=None):
 def get_flow_weight(step):
     if not use_flow_loss:
         return 0.0
+    if step >= flow_train_stop_step:
+        return 0.0
     if flow_warmup_steps <= 0:
         return lambda_flow
     warmup_ratio = min(1.0, float(step + 1) / float(flow_warmup_steps))
@@ -324,23 +342,21 @@ def generate(
         while masked.any():
             total_steps += 1
 
-            # Base logits from the language-model head.
-            logits, _ = model(x)
-
-            # Flow-assisted refinement on masked positions only.
-            current_state = model.token_emb(x)
             remaining_ratio = masked.float().mean().item()
-            t_value = 1.0 - remaining_ratio
-            t_batch = torch.full((1,), t_value, device=device)
-            flow_v = model.forward_flow(current_state, t_batch)
-            refined_state = current_state + flow_step * flow_v
-
-            # Project refined continuous state back to vocab logits.
-            flow_logits = refined_state @ model.token_emb.weight.t()
-
-            # Blend flow logits and LM logits. Use stronger flow when many positions are still masked.
-            flow_blend = min(0.8, 0.25 + 0.55 * remaining_ratio)
-            blended_logits = (1.0 - flow_blend) * logits + flow_blend * flow_logits
+            use_flow_decode = remaining_ratio > flow_decode_ratio_threshold
+            if use_flow_decode:
+                # Use flow-assisted decoding only in early phase.
+                t_value = 1.0 - remaining_ratio
+                t_batch = torch.full((1,), t_value, device=device)
+                logits, flow_v = model.forward_with_flow_tokens(x, t_batch)
+                current_state = model.token_emb(x)
+                refined_state = current_state + flow_step * flow_v
+                flow_logits = refined_state @ model.token_emb.weight.t()
+                flow_blend = min(0.8, 0.25 + 0.55 * remaining_ratio)
+                blended_logits = (1.0 - flow_blend) * logits + flow_blend * flow_logits
+            else:
+                # Late phase: revert to baseline LM decoding for cleaner token polishing.
+                blended_logits, _ = model(x)
 
             probs = F.softmax(blended_logits / temp, dim=-1)
             top_k_probs, top_k_indices = torch.topk(probs, k=top_k, dim=-1)
@@ -474,7 +490,7 @@ if __name__ == "__main__":
                 flow_loss_value = torch.tensor(0.0, device=ce_loss.device)
                 flow_weight = get_flow_weight(iter)
                 total_loss = ce_loss
-                if flow_weight > 0.0:
+                if flow_weight > 0.0 and (iter % flow_loss_interval == 0):
                     flow_loss_value = compute_flow_loss(model, yb, mb)
                     total_loss = ce_loss + flow_weight * flow_loss_value
                 last_batch_ce_loss = ce_loss.item()
