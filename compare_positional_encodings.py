@@ -9,6 +9,7 @@ from pathlib import Path
 
 VARIANTS = {
     "rope": "diffusion.py",
+    "rope_plus": "diffusion_rope_plus.py",
     "polar": "diffusion_polar.py",
     "transformer_sinusoidal": "diffusion_transformer_pe.py",
     "bert_learned": "diffusion_bert_pe.py",
@@ -22,6 +23,10 @@ VARIANT_ORDER = list(VARIANTS.keys())
 
 def parse_seeds(seed_text):
     return [int(s.strip()) for s in seed_text.split(",") if s.strip()]
+
+
+def parse_variants(variant_text):
+    return [v.strip() for v in variant_text.split(",") if v.strip()]
 
 
 def run_one(repo_dir, python_cmd, variant, seed, args):
@@ -133,6 +138,7 @@ def make_plots(records, summary, output_dir):
     fig, ax = plt.subplots(figsize=(8, 5))
     colors = {
         "rope": "#1f77b4",
+        "rope_plus": "#17becf",
         "polar": "#d62728",
         "transformer_sinusoidal": "#2ca02c",
         "bert_learned": "#ff7f0e",
@@ -218,6 +224,11 @@ def main():
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--block-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument(
+        "--variants",
+        default=",".join(VARIANT_ORDER),
+        help=f"Comma-separated variants to run. Available: {', '.join(VARIANT_ORDER)}",
+    )
     parser.add_argument("--output", default="ablation_results.json")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--plot-dir", default="ablation_plots")
@@ -232,15 +243,25 @@ def main():
 
     repo_dir = Path(__file__).resolve().parent
     seeds = parse_seeds(args.seeds)
+    selected_variants = parse_variants(args.variants)
+
+    unknown = [v for v in selected_variants if v not in VARIANTS]
+    if unknown:
+        raise ValueError(
+            f"Unknown variants: {unknown}. Available variants: {list(VARIANTS.keys())}"
+        )
+    if not selected_variants:
+        raise ValueError("No variants selected. Pass at least one value to --variants.")
 
     all_records = []
-    for variant in VARIANT_ORDER:
+    for variant in selected_variants:
         for seed in seeds:
             all_records.append(run_one(repo_dir, args.python, variant, seed, args))
 
     summary = summarize(all_records)
     result = {
         "config": {
+            "variants": selected_variants,
             "seeds": seeds,
             "max_iters": args.max_iters,
             "eval_interval": args.eval_interval,
@@ -262,7 +283,7 @@ def main():
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print("\\n=== Summary ===")
-    for variant in VARIANT_ORDER:
+    for variant in selected_variants:
         if variant not in summary:
             continue
         s = summary[variant]
