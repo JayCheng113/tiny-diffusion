@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import statistics
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,7 @@ def parse_args():
     )
     p.add_argument("--module", default="diffusion")
     p.add_argument("--weights", default="weights/diffusion.pt")
-    p.add_argument("--seeds", default="1337,2027,7,42,123")
+    p.add_argument("--seeds", default="1337,2027,7,42,123,314,2718,9001,65537,8888")
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--prompt-len", type=int, default=16)
     p.add_argument("--temp", type=float, default=0.8)
@@ -35,7 +36,7 @@ def parse_args():
 
     # Sweep (new_two_stage) grid
     p.add_argument("--sweep-confidence-threshold", default="0.95")
-    p.add_argument("--sweep-draft-threshold", default="0.40,0.45,0.50,0.55,0.60,0.65,0.70,0.75")
+    p.add_argument("--sweep-draft-threshold", default="0.20,0.30,0.40,0.50,0.60,0.70")
     p.add_argument("--sweep-confirm-threshold", default="0.85,0.88")
     p.add_argument("--sweep-replace-margin", default="0.0,0.02,0.05")
     p.add_argument("--sweep-target-chunk-len", default="240")
@@ -107,6 +108,20 @@ def mean(values):
 def config_id(cfg):
     key = json.dumps(cfg, sort_keys=True)
     return hashlib.md5(key.encode("utf-8")).hexdigest()[:10]
+
+
+def print_progress(done: int, total: int, prefix: str = "Progress"):
+    if total <= 0:
+        return
+    width = 30
+    ratio = min(max(done / total, 0.0), 1.0)
+    filled = int(width * ratio)
+    bar = "#" * filled + "-" * (width - filled)
+    msg = f"\r{prefix} [{bar}] {done}/{total} ({ratio * 100:5.1f}%)"
+    sys.stdout.write(msg)
+    sys.stdout.flush()
+    if done >= total:
+        sys.stdout.write("\n")
 
 
 def draw_speed_vs_quality(agg_rows, out_path: Path):
@@ -210,10 +225,16 @@ def main():
         }
         new_cfgs.append(cfg)
 
+    total_units = len(seeds) + len(new_cfgs) * len(seeds)
+    done_units = 0
+    print_progress(done_units, total_units, prefix="Running")
+
     # Baseline once per seed, reused for all comparisons.
     base_rows = {}
     for seed in seeds:
         base_rows[seed] = run_one(module, model, seed, {**common, **baseline_cfg})
+        done_units += 1
+        print_progress(done_units, total_units, prefix="Running")
 
     run_rows = []
     agg_rows = []
@@ -242,6 +263,8 @@ def main():
             }
             run_rows.append(row)
             per_seed.append(row)
+            done_units += 1
+            print_progress(done_units, total_units, prefix="Running")
 
         agg = {
             "config_id": cid,
