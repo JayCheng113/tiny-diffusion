@@ -27,7 +27,7 @@ def run_one(repo_dir, python_cmd, variant, seed, args):
         {
             "TD_TRAIN": "1",
             "TD_LOAD_WEIGHTS": "0",
-            "TD_SAVE_WEIGHTS": "0",
+            "TD_SAVE_WEIGHTS": "1" if args.save_weights else "0",
             "TD_SAMPLE_DURING_TRAIN": "0",
             "TD_RUN_GENERATE": "0",
             "TD_SEED": str(seed),
@@ -209,6 +209,13 @@ def main():
     parser.add_argument("--output", default="ablation_results.json")
     parser.add_argument("--no-plot", action="store_true")
     parser.add_argument("--plot-dir", default="ablation_plots")
+    parser.add_argument(
+        "--no-save-weights",
+        dest="save_weights",
+        action="store_false",
+        help="Disable saving per-run checkpoints under weights/ablation.",
+    )
+    parser.set_defaults(save_weights=True)
     args = parser.parse_args()
 
     repo_dir = Path(__file__).resolve().parent
@@ -229,6 +236,7 @@ def main():
             "batch_size": args.batch_size,
             "block_size": args.block_size,
             "learning_rate": args.learning_rate,
+            "save_weights": args.save_weights,
         },
         "summary": summary,
         "runs": all_records,
