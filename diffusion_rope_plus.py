@@ -4,7 +4,6 @@
 import os
 import sys
 import time
-import math
 
 import torch
 import torch.nn as nn
@@ -117,18 +116,18 @@ def apply_rotary_emb(x, cos, sin):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, mask_gate_alpha=0.5):
+    def __init__(self):
         super().__init__()
         self.c_q = nn.Linear(n_embd, n_embd, bias=False)
         self.c_k = nn.Linear(n_embd, n_embd, bias=False)
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
-        self.phi = nn.Parameter(torch.zeros(head_dim // 2))
-        self.beta_logit = nn.Parameter(torch.tensor(0.0))
-        self.phi_max = math.pi / 4.0
-        self.mask_gate_alpha = float(mask_gate_alpha)
+        # Per-head mask-aware bias coefficients: [m_i, m_j, m_i*m_j].
+        self.mask_bias_raw = nn.Parameter(torch.zeros(n_head, 3))
+        self.mask_bias_max = float(_getenv_float("TD_MASK_BIAS_MAX", 0.5))
+        self.mask_bias_clamp = float(_getenv_float("TD_MASK_BIAS_CLAMP", 2.0))
 
-    def forward(self, x, cos_sin, token_is_mask):
+    def forward(self, x, cos_sin, token_is_mask, bias_scale):
         B, T, C = x.size()
 
         # Project the input to get queries, keys, and values
@@ -140,27 +139,8 @@ class MultiHeadAttention(nn.Module):
         cos = cos[:, :T].to(q.dtype)
         sin = sin[:, :T].to(q.dtype)
 
-        # Learnable per-frequency phase shift with bounded range.
-        phi = (self.phi_max * torch.tanh(self.phi)).to(q.dtype).view(1, 1, 1, -1)
-        cos_phi = torch.cos(phi)
-        sin_phi = torch.sin(phi)
-        cos_shift = cos * cos_phi - sin * sin_phi
-        sin_shift = sin * cos_phi + cos * sin_phi
-
-        gate = cos_shift
-        gate = gate * torch.rsqrt(gate.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
-        gate = torch.cat([gate, gate], dim=-1)
-
-        a = torch.where(token_is_mask, self.mask_gate_alpha, 1.0)
-        a = a.to(q.dtype).view(B, T, 1, 1)
-        beta = torch.sigmoid(self.beta_logit).to(q.dtype)
-        state_scale = 1.0 + beta * (a - 1.0)
-
-        q = q * gate * state_scale
-        k = k * gate * state_scale
-
-        # Apply RoPE using phase-shifted cos/sin.
-        q, k = apply_rotary_emb(q, cos_shift, sin_shift), apply_rotary_emb(k, cos_shift, sin_shift)
+        # Keep positional encoding as pure RoPE.
+        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
         q, k = norm(q), norm(k)  # QK norm
         q, k, v = (
             q.transpose(1, 2),
@@ -168,8 +148,20 @@ class MultiHeadAttention(nn.Module):
             v.transpose(1, 2),
         )  # (B, T, H, D) -> (B, H, T, D)
 
+        # Add bounded, warm-started mask-aware bias outside the dot product.
+        m = token_is_mask.to(q.dtype)
+        m_i = m[:, None, :, None]  # (B,1,T,1)
+        m_j = m[:, None, None, :]  # (B,1,1,T)
+        coeff = self.mask_bias_max * torch.tanh(self.mask_bias_raw).to(q.dtype)
+        coeff = coeff * float(bias_scale)
+        g1 = coeff[:, 0].view(1, n_head, 1, 1)
+        g2 = coeff[:, 1].view(1, n_head, 1, 1)
+        g3 = coeff[:, 2].view(1, n_head, 1, 1)
+        attn_bias = g1 * m_i + g2 * m_j + g3 * (m_i * m_j)
+        attn_bias = torch.clamp(attn_bias, -self.mask_bias_clamp, self.mask_bias_clamp).to(q.dtype)
+
         # [NEW]: Set to false for bidirectional instead of causal self-attention
-        y = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, is_causal=False)
 
         # Re-assemble the heads and project back
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -196,8 +188,8 @@ class Block(nn.Module):
         self.attn = MultiHeadAttention()
         self.mlp = MLP()
 
-    def forward(self, x, cos_sin, token_is_mask):
-        x = x + self.attn(norm(x), cos_sin, token_is_mask)
+    def forward(self, x, cos_sin, token_is_mask, bias_scale):
+        x = x + self.attn(norm(x), cos_sin, token_is_mask, bias_scale)
         x = x + self.mlp(norm(x))
         return x
 
@@ -217,6 +209,10 @@ class Model(nn.Module):
 
         # Transformer blocks
         self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
+        self.bias_warmup_steps = _getenv_int("TD_MASK_BIAS_WARMUP_STEPS", 800)
+        self.bias_ramp_steps = _getenv_int("TD_MASK_BIAS_RAMP_STEPS", 1200)
+        # Default to fully enabled bias for inference-only usage.
+        self.current_step = self.bias_warmup_steps + self.bias_ramp_steps
 
         # Output head to predict denoised tokens
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
@@ -245,6 +241,17 @@ class Model(nn.Module):
         )  # add batch and head dims
         return cos, sin
 
+    def set_step(self, step):
+        self.current_step = int(step)
+
+    def _mask_bias_scale(self):
+        step = int(self.current_step)
+        if step < self.bias_warmup_steps:
+            return 0.0
+        if self.bias_ramp_steps <= 0:
+            return 1.0
+        return min(1.0, (step - self.bias_warmup_steps) / float(self.bias_ramp_steps))
+
     def forward(self, idx, targets=None, mask=None):
         B, T = idx.size()
 
@@ -256,10 +263,11 @@ class Model(nn.Module):
         assert T <= self.cos.size(1)
         cos_sin = (self.cos[:, :T], self.sin[:, :T])
         token_is_mask = idx == mask_token_id
+        bias_scale = self._mask_bias_scale()
 
         # Forward through transformer blocks
         for block in self.blocks:
-            x = block(x, cos_sin, token_is_mask)
+            x = block(x, cos_sin, token_is_mask, bias_scale)
         x = norm(x)
 
         # Predict denoised tokens
@@ -388,6 +396,7 @@ if __name__ == "__main__":
 
         start = time.time()
         for iter in range(max_iters):
+            model.set_step(iter)
             # every once in a while evaluate the loss on train and val sets
             if iter % eval_interval == 0 or iter == max_iters - 1:
                 losses = estimate_loss()
@@ -424,6 +433,7 @@ if __name__ == "__main__":
 
     # generate from the model
     if run_generate:
+        model.set_step(model.bias_warmup_steps + model.bias_ramp_steps)
         start = time.time()
         output = generate(
             m, max_new_tokens=final_gen_tokens, temp=0.8, confidence_threshold=0.95, top_k=2
