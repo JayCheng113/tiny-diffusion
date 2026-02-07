@@ -289,6 +289,8 @@ uv run sweep_new_two_stage_vs_baseline.py \
 - `speed_vs_quality.png`：速度-质量散点图
 - `speed_vs_parallel.png`：速度-并行度散点图
 - `top_speed_configs.png`：最快配置条形图
+- `finalize_age_speed_heatmap.png`：`min_draft_conf_for_finalize x max_draft_age` 的速度热力图
+- `finalize_age_repeat_heatmap.png`：`min_draft_conf_for_finalize x max_draft_age` 的重复率热力图
 
 ## 代码结构
 

@@ -170,7 +170,11 @@ def draw_speed_vs_parallel(agg_rows, out_path: Path):
 def draw_topk_speed_bars(agg_rows, out_path: Path, top_k: int = 8):
     top = agg_rows[: min(top_k, len(agg_rows))]
     labels = [
-        f"{r['config_id']}\n(d={r['draft_threshold']},c={r['confirm_threshold']},m={r['replace_margin']})"
+        (
+            f"{r['config_id']}\n"
+            f"(d={r['draft_threshold']},c={r['confirm_threshold']},m={r['replace_margin']},"
+            f"f={r['min_draft_conf_for_finalize']},age={r['max_draft_age']})"
+        )
         for r in top
     ]
     values = [r["delta_elapsed_sec_mean"] for r in top]
@@ -180,6 +184,49 @@ def draw_topk_speed_bars(agg_rows, out_path: Path, top_k: int = 8):
     plt.xticks(range(len(top)), labels, rotation=25, ha="right")
     plt.ylabel("Delta Elapsed Seconds (new - baseline)")
     plt.title("Top Configs by Speed Gain")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=180)
+    plt.close()
+
+
+def _group_by_finalize_age(agg_rows):
+    finals = sorted({r["min_draft_conf_for_finalize"] for r in agg_rows})
+    ages = sorted({r["max_draft_age"] for r in agg_rows})
+    grouped = {(f, a): [] for f in finals for a in ages}
+    for r in agg_rows:
+        grouped[(r["min_draft_conf_for_finalize"], r["max_draft_age"])].append(r)
+    return finals, ages, grouped
+
+
+def draw_finalize_age_heatmap(agg_rows, metric_key: str, title: str, out_path: Path):
+    finals, ages, grouped = _group_by_finalize_age(agg_rows)
+    matrix = []
+    for f in finals:
+        row = []
+        for a in ages:
+            vals = [x[metric_key] for x in grouped[(f, a)]]
+            row.append(float(statistics.mean(vals)) if vals else 0.0)
+        matrix.append(row)
+
+    plt.figure(figsize=(8, 6))
+    im = plt.imshow(matrix, aspect="auto", cmap="coolwarm")
+    plt.colorbar(im)
+    plt.xticks(range(len(ages)), [str(a) for a in ages])
+    plt.yticks(range(len(finals)), [f"{f:.2f}" for f in finals])
+    plt.xlabel("max_draft_age")
+    plt.ylabel("min_draft_conf_for_finalize")
+    plt.title(title)
+    for i in range(len(finals)):
+        for j in range(len(ages)):
+            plt.text(
+                j,
+                i,
+                f"{matrix[i][j]:.3f}",
+                ha="center",
+                va="center",
+                fontsize=8,
+                color="black",
+            )
     plt.tight_layout()
     plt.savefig(out_path, dpi=180)
     plt.close()
@@ -333,6 +380,8 @@ def main():
     fig_speed_quality = out_dir / "speed_vs_quality.png"
     fig_speed_parallel = out_dir / "speed_vs_parallel.png"
     fig_top_speed = out_dir / "top_speed_configs.png"
+    fig_finalize_age_speed = out_dir / "finalize_age_speed_heatmap.png"
+    fig_finalize_age_repeat = out_dir / "finalize_age_repeat_heatmap.png"
 
     run_json.write_text(json.dumps(run_rows, ensure_ascii=False, indent=2), encoding="utf-8")
     agg_json.write_text(json.dumps(agg_rows, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -347,6 +396,18 @@ def main():
     draw_speed_vs_quality(agg_rows, fig_speed_quality)
     draw_speed_vs_parallel(agg_rows, fig_speed_parallel)
     draw_topk_speed_bars(agg_rows, fig_top_speed, top_k=8)
+    draw_finalize_age_heatmap(
+        agg_rows,
+        metric_key="delta_elapsed_sec_mean",
+        title="Finalize/Age vs Delta Elapsed Seconds (new - baseline)",
+        out_path=fig_finalize_age_speed,
+    )
+    draw_finalize_age_heatmap(
+        agg_rows,
+        metric_key="delta_repeat_char_ratio_mean",
+        title="Finalize/Age vs Delta Repeat-Char Ratio (new - baseline)",
+        out_path=fig_finalize_age_repeat,
+    )
 
     print(f"Saved sweep report to: {out_dir}")
     print(f"- {run_json.name}")
@@ -355,6 +416,8 @@ def main():
     print(f"- {fig_speed_quality.name}")
     print(f"- {fig_speed_parallel.name}")
     print(f"- {fig_top_speed.name}")
+    print(f"- {fig_finalize_age_speed.name}")
+    print(f"- {fig_finalize_age_repeat.name}")
 
 
 if __name__ == "__main__":
