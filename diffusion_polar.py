@@ -113,7 +113,7 @@ class MultiHeadAttention(nn.Module):
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.phi = nn.Parameter(torch.zeros(head_dim))
-        self.beta_logit = nn.Parameter(torch.tensor(1.0))
+        self.beta_logit = nn.Parameter(torch.tensor(0.0))
         self.phi_max = math.pi / 4.0
         self.mask_gate_alpha = float(mask_gate_alpha)
 
@@ -136,6 +136,7 @@ class MultiHeadAttention(nn.Module):
         pos_cos = pos_cos[:, :T].to(q.dtype)
         pos_sin = pos_sin[:, :T].to(q.dtype)
         gate = pos_cos * cos_phi - pos_sin * sin_phi
+        gate = gate * torch.rsqrt(gate.pow(2).mean(dim=-1, keepdim=True) + 1e-6)
 
         q = q * gate * state_scale
         k = k * gate * state_scale
