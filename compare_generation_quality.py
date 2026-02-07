@@ -8,6 +8,12 @@ from torch.nn import functional as F
 
 import diffusion as rope_mod
 import diffusion_polar as polar_mod
+import diffusion_rope_plus as rope_plus_mod
+
+OTHER_VARIANT_MODULES = {
+    "polar": polar_mod,
+    "rope_plus": rope_plus_mod,
+}
 
 
 def parse_prompt_starts(data_len, prompt_len, num_prompts, seed):
@@ -132,9 +138,17 @@ def summarize(metric_list):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compare generated text quality for RoPE vs Polar.")
+    parser = argparse.ArgumentParser(
+        description="Compare generated text quality for RoPE vs another variant."
+    )
     parser.add_argument("--rope-weights", required=True)
-    parser.add_argument("--polar-weights", required=True)
+    parser.add_argument(
+        "--other-variant",
+        choices=sorted(OTHER_VARIANT_MODULES.keys()),
+        default="polar",
+        help="Variant to compare against RoPE.",
+    )
+    parser.add_argument("--other-weights", required=True)
     parser.add_argument("--num-prompts", type=int, default=8)
     parser.add_argument("--prompt-len", type=int, default=32)
     parser.add_argument("--gen-len", type=int, default=256)
@@ -146,7 +160,8 @@ def main():
     args = parser.parse_args()
 
     rope_model = load_model(rope_mod, args.rope_weights)
-    polar_model = load_model(polar_mod, args.polar_weights)
+    other_mod = OTHER_VARIANT_MODULES[args.other_variant]
+    other_model = load_model(other_mod, args.other_weights)
 
     starts = parse_prompt_starts(
         data_len=len(rope_mod.val_data),
@@ -157,7 +172,7 @@ def main():
 
     variants = {
         "rope": {"module": rope_mod, "model": rope_model, "results": []},
-        "polar": {"module": polar_mod, "model": polar_model, "results": []},
+        args.other_variant: {"module": other_mod, "model": other_model, "results": []},
     }
 
     for i, start in enumerate(starts):
@@ -225,7 +240,8 @@ def main():
             "confidence_threshold": args.confidence_threshold,
             "seed": args.seed,
             "rope_weights": args.rope_weights,
-            "polar_weights": args.polar_weights,
+            "other_variant": args.other_variant,
+            "other_weights": args.other_weights,
         },
         "summary": summary,
         "runs": {k: v["results"] for k, v in variants.items()},
@@ -235,7 +251,7 @@ def main():
     output_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
 
     print("\n=== Generation Summary ===")
-    for variant_name in ["rope", "polar"]:
+    for variant_name in ["rope", args.other_variant]:
         s = summary[variant_name]
         print(
             f"{variant_name}: repeat_3gram={s['repeat_3gram_ratio']['mean']:.4f}±{s['repeat_3gram_ratio']['std']:.4f}, "
