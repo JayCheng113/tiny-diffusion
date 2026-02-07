@@ -63,6 +63,45 @@ flowchart TD
     Diff --> Flow
 ```
 
+## new_two_stage 解码架构（新增）
+
+`diffusion.py` 当前已支持基于 `new_two_stage` 的两阶段并行解码。核心思路是：
+
+1. `pending -> draft -> confirmed` 三状态推进  
+2. 低阈值 `draft_threshold` 先并行铺草稿  
+3. 高阈值 `confirm_threshold` 再做定稿  
+4. draft 支持替换（`replace_margin`）与回收重解（TTL）
+
+### 核心机制
+
+- `min_draft_conf_for_finalize`：草稿最低定稿置信门槛  
+- `max_draft_age`：草稿最大存活轮数（超龄回收为 pending）  
+- `max_block_steps`：每个 block 的最大迭代步数（防死循环）  
+- `max_stall_iters`：连续无确认进展上限（超限强制确认一个位置）
+
+### 主要参数（生成）
+
+- 速度相关：`draft_threshold`、`target_chunk_len`
+- 质量相关：`confirm_threshold`、`replace_margin`、`min_draft_conf_for_finalize`
+- 稳定性相关：`max_draft_age`、`max_block_steps`、`max_stall_iters`
+
+### 相关文件
+
+- `diffusion.py`：`generate()` 的新状态机与防卡死逻辑
+- `evaluate_generate_methods.py`：固定两组参数做 A/B
+- `analyze_generate_quality.py`：A/B 文本质量统计
+- `sweep_new_two_stage_vs_baseline.py`：网格搜索 + baseline 对比 + 可视化
+
+### 快速运行
+
+```bash
+# baseline 单次生成
+uv run python -c "import torch, diffusion; m=diffusion.Model().to(diffusion.device); m.load_state_dict(torch.load('weights/diffusion.pt', map_location=diffusion.device)); m.eval(); print(diffusion.generate(m, max_new_tokens=512, prompt_len=16, temp=0.8, top_k=2, confidence_threshold=0.85, draft_threshold=0.85, confirm_threshold=0.85, replace_margin=1.0, target_chunk_len=240, min_draft_conf_for_finalize=0.0, max_draft_age=0, max_block_steps=2000, max_stall_iters=80))"
+
+# new_two_stage 单次生成（可按实验替换参数）
+uv run python -c "import torch, diffusion; m=diffusion.Model().to(diffusion.device); m.load_state_dict(torch.load('weights/diffusion.pt', map_location=diffusion.device)); m.eval(); print(diffusion.generate(m, max_new_tokens=512, prompt_len=16, temp=0.8, top_k=2, confidence_threshold=0.95, draft_threshold=0.4, confirm_threshold=0.88, replace_margin=0.05, target_chunk_len=240, min_draft_conf_for_finalize=0.5, max_draft_age=8, max_block_steps=2000, max_stall_iters=80))"
+```
+
 ## 环境准备
 
 ### 1) 安装依赖
