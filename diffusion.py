@@ -248,6 +248,8 @@ def generate(
     target_chunk_len=240,
     min_draft_conf_for_finalize=0.0,
     max_draft_age=0,
+    max_block_steps=2000,
+    max_stall_iters=80,
 ):
     if confirm_threshold is None:
         confirm_threshold = confidence_threshold
@@ -261,6 +263,10 @@ def generate(
         raise ValueError("target_chunk_len must be > 0")
     if max_draft_age < 0:
         raise ValueError("max_draft_age must be >= 0")
+    if max_block_steps < 0:
+        raise ValueError("max_block_steps must be >= 0")
+    if max_stall_iters < 0:
+        raise ValueError("max_stall_iters must be >= 0")
 
     all_tokens = data[:prompt_len].tolist()
     total_steps = 0
@@ -283,11 +289,16 @@ def generate(
         confirmed = torch.zeros_like(target_mask)
         draft_conf = torch.full((1, block_size), -float("inf"), device=device)
         draft_age = torch.zeros((1, block_size), dtype=torch.long, device=device)
+        block_steps = 0
+        block_step_cap = max_block_steps
+        stall_limit = max_stall_iters
+        stall_count = 0
 
         # Iteratively decode with two thresholds:
         # 1) low threshold for draft fill, 2) high threshold for final confirmation.
         while confirmed.sum().item() < block_len:
             total_steps += 1
+            block_steps += 1
             draft_age = torch.where(draft, draft_age + 1, torch.zeros_like(draft_age))
 
             # Get predictions and confidences
@@ -317,6 +328,7 @@ def generate(
                     draft_conf,
                 )
                 draft_age = torch.where(confirm_candidates, torch.zeros_like(draft_age), draft_age)
+                stall_count = 0
 
             # Fill pending positions as drafts using the low threshold.
             new_draft = pending & (confidences >= draft_threshold)
@@ -358,7 +370,31 @@ def generate(
                 or replace_candidates.any()
                 or expired.any()
             )
+            if not confirm_candidates.any():
+                stall_count += 1
             if progressed:
+                # Hard guard: if a block takes too long, force one confirmation.
+                if block_steps >= block_step_cap:
+                    force_pool = (pending | draft) & target_mask
+                    if force_pool.any():
+                        force_scores = torch.where(
+                            force_pool, confidences, torch.full_like(confidences, -float("inf"))
+                        )
+                        force_confirm = torch.zeros_like(force_pool)
+                        force_confirm.view(-1)[force_scores.argmax()] = True
+                        x = torch.where(force_confirm, sampled_tokens, x)
+                        confirmed = confirmed | force_confirm
+                        pending = pending & ~force_confirm
+                        draft = draft & ~force_confirm
+                        draft_conf = torch.where(
+                            force_confirm,
+                            torch.full_like(draft_conf, -float("inf")),
+                            draft_conf,
+                        )
+                        draft_age = torch.where(
+                            force_confirm, torch.zeros_like(draft_age), draft_age
+                        )
+                        stall_count = 0
                 continue
 
             # Fallback:
@@ -405,6 +441,29 @@ def generate(
                         draft_conf,
                     )
                     draft_age = torch.where(recycle, torch.zeros_like(draft_age), draft_age)
+
+            # Secondary guard: too many iterations without confirmation -> force one.
+            if stall_count >= stall_limit:
+                force_pool = (pending | draft) & target_mask
+                if force_pool.any():
+                    force_scores = torch.where(
+                        force_pool, confidences, torch.full_like(confidences, -float("inf"))
+                    )
+                    force_confirm = torch.zeros_like(force_pool)
+                    force_confirm.view(-1)[force_scores.argmax()] = True
+                    x = torch.where(force_confirm, sampled_tokens, x)
+                    confirmed = confirmed | force_confirm
+                    pending = pending & ~force_confirm
+                    draft = draft & ~force_confirm
+                    draft_conf = torch.where(
+                        force_confirm,
+                        torch.full_like(draft_conf, -float("inf")),
+                        draft_conf,
+                    )
+                    draft_age = torch.where(
+                        force_confirm, torch.zeros_like(draft_age), draft_age
+                    )
+                    stall_count = 0
 
         # Extract and append generated tokens
         all_tokens.extend(x[0, prompt_len : prompt_len + block_len].tolist())

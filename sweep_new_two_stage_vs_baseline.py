@@ -35,6 +35,8 @@ def parse_args():
     p.add_argument("--base-target-chunk-len", type=int, default=240)
     p.add_argument("--base-min-draft-conf-for-finalize", type=float, default=0.0)
     p.add_argument("--base-max-draft-age", type=int, default=0)
+    p.add_argument("--base-max-block-steps", type=int, default=800)
+    p.add_argument("--base-max-stall-iters", type=int, default=40)
 
     # Sweep (new_two_stage) grid
     p.add_argument("--sweep-confidence-threshold", default="0.95")
@@ -44,6 +46,8 @@ def parse_args():
     p.add_argument("--sweep-target-chunk-len", default="240")
     p.add_argument("--sweep-min-draft-conf-for-finalize", default="0.0,0.5,0.7")
     p.add_argument("--sweep-max-draft-age", default="0,4,8")
+    p.add_argument("--sweep-max-block-steps", default="2000")
+    p.add_argument("--sweep-max-stall-iters", default="80")
 
     p.add_argument("--output-dir", default="sweep_generate_reports")
     return p.parse_args()
@@ -255,6 +259,8 @@ def main():
         "target_chunk_len": args.base_target_chunk_len,
         "min_draft_conf_for_finalize": args.base_min_draft_conf_for_finalize,
         "max_draft_age": args.base_max_draft_age,
+        "max_block_steps": args.base_max_block_steps,
+        "max_stall_iters": args.base_max_stall_iters,
     }
 
     sweep_conf = parse_list(args.sweep_confidence_threshold, float)
@@ -264,9 +270,11 @@ def main():
     sweep_chunk = parse_list(args.sweep_target_chunk_len, int)
     sweep_min_finalize = parse_list(args.sweep_min_draft_conf_for_finalize, float)
     sweep_max_age = parse_list(args.sweep_max_draft_age, int)
+    sweep_max_block_steps = parse_list(args.sweep_max_block_steps, int)
+    sweep_max_stall_iters = parse_list(args.sweep_max_stall_iters, int)
 
     new_cfgs = []
-    for c, d, cf, m, ch, mf, ma in itertools.product(
+    for c, d, cf, m, ch, mf, ma, mbs, msi in itertools.product(
         sweep_conf,
         sweep_draft,
         sweep_confirm,
@@ -274,6 +282,8 @@ def main():
         sweep_chunk,
         sweep_min_finalize,
         sweep_max_age,
+        sweep_max_block_steps,
+        sweep_max_stall_iters,
     ):
         if d > cf:
             continue
@@ -285,6 +295,8 @@ def main():
             "target_chunk_len": ch,
             "min_draft_conf_for_finalize": mf,
             "max_draft_age": ma,
+            "max_block_steps": mbs,
+            "max_stall_iters": msi,
         }
         new_cfgs.append(cfg)
 
