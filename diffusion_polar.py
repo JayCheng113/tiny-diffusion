@@ -113,6 +113,7 @@ class MultiHeadAttention(nn.Module):
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.phi = nn.Parameter(torch.zeros(head_dim))
+        self.beta_logit = nn.Parameter(torch.tensor(1.0))
         self.phi_max = math.pi / 4.0
         self.mask_gate_alpha = float(mask_gate_alpha)
 
@@ -125,6 +126,8 @@ class MultiHeadAttention(nn.Module):
 
         a = torch.where(token_is_mask, self.mask_gate_alpha, 1.0)
         a = a.to(q.dtype).view(B, T, 1, 1)
+        beta = torch.sigmoid(self.beta_logit).to(q.dtype)
+        state_scale = 1.0 + beta * (a - 1.0)
 
         # Constrain learnable phase to a bounded range for stability.
         phi = (self.phi_max * torch.tanh(self.phi)).to(q.dtype).view(1, 1, 1, head_dim)
@@ -134,8 +137,8 @@ class MultiHeadAttention(nn.Module):
         pos_sin = pos_sin[:, :T].to(q.dtype)
         gate = pos_cos * cos_phi - pos_sin * sin_phi
 
-        q = q * gate * a
-        k = k * gate * a
+        q = q * gate * state_scale
+        k = k * gate * state_scale
 
         q, k = norm(q), norm(k)  # QK norm
         q, k, v = (
