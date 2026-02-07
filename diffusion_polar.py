@@ -104,36 +104,32 @@ def norm(x):
     return F.rms_norm(x, (x.size(-1),))
 
 
-def apply_rotary_emb(x, cos, sin):
-    assert x.ndim == 4  # multihead attention
-    d = x.shape[3] // 2
-    x1, x2 = x[..., :d], x[..., d:]  # split up last time into two halves
-    y1 = x1 * cos + x2 * sin  # rotate pairs of dims
-    y2 = x1 * (-sin) + x2 * cos
-    out = torch.cat([y1, y2], 3)  # re-assemble
-    out = out.to(x.dtype)  # ensure input/output dtypes match
-    return out
-
-
 class MultiHeadAttention(nn.Module):
-    def __init__(self):
+    def __init__(self, mask_gate_alpha=0.3):
         super().__init__()
         self.c_q = nn.Linear(n_embd, n_embd, bias=False)
         self.c_k = nn.Linear(n_embd, n_embd, bias=False)
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
+        self.phi = nn.Parameter(torch.zeros(head_dim))
+        self.mask_gate_alpha = float(mask_gate_alpha)
 
-    def forward(self, x, cos_sin):
+    def forward(self, x, pos_gate, token_is_mask):
         B, T, C = x.size()
 
-        # Project the input to get queries, keys, and values
         q = self.c_q(x).view(B, T, n_head, head_dim)
         k = self.c_k(x).view(B, T, n_head, head_dim)
         v = self.c_v(x).view(B, T, n_head, head_dim)
 
-        # Apply Rotary Embeddings to queries and keys to get relative positional encoding
-        cos, sin = cos_sin
-        q, k = apply_rotary_emb(q, cos, sin), apply_rotary_emb(k, cos, sin)
+        a = torch.where(token_is_mask, self.mask_gate_alpha, 1.0)
+        a = a.to(q.dtype).view(B, T, 1, 1)
+
+        phi = self.phi.to(q.dtype).view(1, 1, 1, head_dim)
+        gate = pos_gate[:, :T].to(q.dtype) * torch.cos(phi)
+
+        q = q * gate * a
+        k = k * gate * a
+
         q, k = norm(q), norm(k)  # QK norm
         q, k, v = (
             q.transpose(1, 2),
@@ -169,8 +165,8 @@ class Block(nn.Module):
         self.attn = MultiHeadAttention()
         self.mlp = MLP()
 
-    def forward(self, x, cos_sin):
-        x = x + self.attn(norm(x), cos_sin)
+    def forward(self, x, pos_gate, token_is_mask):
+        x = x + self.attn(norm(x), pos_gate, token_is_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -182,11 +178,10 @@ class Model(nn.Module):
         # Token embeddings
         self.token_emb = nn.Embedding(vocab_size, n_embd)
 
-        # Rotary embeddings
-        self.rotary_seq_len = block_size * 2
-        cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len)
-        self.register_buffer("cos", cos, persistent=False)
-        self.register_buffer("sin", sin, persistent=False)
+        # [NEW]: Polar (per-dim) positional gate for Q/K, cached as a buffer
+        self.pos_seq_len = block_size * 2  # same spirit as old rotary_seq_len
+        pos_gate = self._precompute_polar_gate(self.pos_seq_len)  # (1, L, 1, head_dim)
+        self.register_buffer("pos_gate", pos_gate, persistent=False)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
@@ -204,34 +199,36 @@ class Model(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def _precompute_rotary_embeddings(self, seq_len, base=10000, device=None):
+    def _precompute_polar_gate(self, seq_len, base=10000, device=None):
+        """
+        Polar per-dimension phase gate:
+            gate[i, k] = cos(i * omega_k + phi_k)
+        Here we cache cos(i * omega_k) and keep phi_k as learnable in the attention module.
+        """
         if device is None:
             device = self.token_emb.weight.device
-        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (base ** (channel_range / head_dim))
+
+        k = torch.arange(head_dim, dtype=torch.float32, device=device)
+        omega = 1.0 / (base ** (k / head_dim))
+
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
-        freqs = torch.outer(t, inv_freq)
-        cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = (
-            cos[None, :, None, :],
-            sin[None, :, None, :],
-        )  # add batch and head dims
-        return cos, sin
+        phase = torch.outer(t, omega)
+
+        gate = torch.cos(phase)[None, :, None, :]
+        return gate
 
     def forward(self, idx, targets=None, mask=None):
         B, T = idx.size()
 
-        # Get embeddings
-        x = self.token_emb(idx)  # (B, T, n_embd)
+        x = self.token_emb(idx)
         x = norm(x)
 
-        # Get rotary embeddings
-        assert T <= self.cos.size(1)
-        cos_sin = (self.cos[:, :T], self.sin[:, :T])
+        assert T <= self.pos_gate.size(1)
+        pos_gate = self.pos_gate[:, :T]
+        token_is_mask = idx == mask_token_id
 
-        # Forward through transformer blocks
         for block in self.blocks:
-            x = block(x, cos_sin)
+            x = block(x, pos_gate, token_is_mask)
         x = norm(x)
 
         # Predict denoised tokens
@@ -332,7 +329,7 @@ def estimate_loss():
 
 if __name__ == "__main__":
     train_flag = "--train" in sys.argv or _getenv_bool("TD_TRAIN", False)
-    weights_path = os.getenv("TD_WEIGHTS_PATH", "weights/diffusion.pt")
+    weights_path = os.getenv("TD_WEIGHTS_PATH", "weights/diffusion_polar.pt")
     load_weights = _getenv_bool("TD_LOAD_WEIGHTS", True)
     save_weights = _getenv_bool("TD_SAVE_WEIGHTS", True)
     sample_during_train = _getenv_bool("TD_SAMPLE_DURING_TRAIN", True)
