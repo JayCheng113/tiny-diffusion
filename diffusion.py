@@ -246,6 +246,8 @@ def generate(
     confirm_threshold=None,
     replace_margin=0.0,
     target_chunk_len=240,
+    min_draft_conf_for_finalize=0.0,
+    max_draft_age=0,
 ):
     if confirm_threshold is None:
         confirm_threshold = confidence_threshold
@@ -253,8 +255,12 @@ def generate(
         raise ValueError("draft_threshold and confirm_threshold must be in [0, 1]")
     if draft_threshold > confirm_threshold:
         raise ValueError("draft_threshold should be <= confirm_threshold")
+    if not (0.0 <= min_draft_conf_for_finalize <= 1.0):
+        raise ValueError("min_draft_conf_for_finalize must be in [0, 1]")
     if target_chunk_len <= 0:
         raise ValueError("target_chunk_len must be > 0")
+    if max_draft_age < 0:
+        raise ValueError("max_draft_age must be >= 0")
 
     all_tokens = data[:prompt_len].tolist()
     total_steps = 0
@@ -276,11 +282,13 @@ def generate(
         draft = torch.zeros_like(target_mask)
         confirmed = torch.zeros_like(target_mask)
         draft_conf = torch.full((1, block_size), -float("inf"), device=device)
+        draft_age = torch.zeros((1, block_size), dtype=torch.long, device=device)
 
         # Iteratively decode with two thresholds:
         # 1) low threshold for draft fill, 2) high threshold for final confirmation.
         while confirmed.sum().item() < block_len:
             total_steps += 1
+            draft_age = torch.where(draft, draft_age + 1, torch.zeros_like(draft_age))
 
             # Get predictions and confidences
             logits, _ = model(x)
@@ -303,6 +311,12 @@ def generate(
                 confirmed = confirmed | confirm_candidates
                 pending = pending & ~confirm_candidates
                 draft = draft & ~confirm_candidates
+                draft_conf = torch.where(
+                    confirm_candidates,
+                    torch.full_like(draft_conf, -float("inf")),
+                    draft_conf,
+                )
+                draft_age = torch.where(confirm_candidates, torch.zeros_like(draft_age), draft_age)
 
             # Fill pending positions as drafts using the low threshold.
             new_draft = pending & (confidences >= draft_threshold)
@@ -311,6 +325,7 @@ def generate(
                 draft = draft | new_draft
                 pending = pending & ~new_draft
                 draft_conf = torch.where(new_draft, confidences, draft_conf)
+                draft_age = torch.where(new_draft, torch.zeros_like(draft_age), draft_age)
 
             # For draft positions, keep the token but allow replacement if confidence improves.
             replace_candidates = (
@@ -321,9 +336,27 @@ def generate(
             if replace_candidates.any():
                 x = torch.where(replace_candidates, sampled_tokens, x)
                 draft_conf = torch.where(replace_candidates, confidences, draft_conf)
+                draft_age = torch.where(replace_candidates, torch.zeros_like(draft_age), draft_age)
+
+            expired = torch.zeros_like(draft)
+            if max_draft_age > 0:
+                expired = draft & (draft_age >= max_draft_age)
+                if expired.any():
+                    x = torch.where(expired, torch.full_like(x, mask_token_id), x)
+                    pending = pending | expired
+                    draft = draft & ~expired
+                    draft_conf = torch.where(
+                        expired,
+                        torch.full_like(draft_conf, -float("inf")),
+                        draft_conf,
+                    )
+                    draft_age = torch.where(expired, torch.zeros_like(draft_age), draft_age)
 
             progressed = (
-                confirm_candidates.any() or new_draft.any() or replace_candidates.any()
+                confirm_candidates.any()
+                or new_draft.any()
+                or replace_candidates.any()
+                or expired.any()
             )
             if progressed:
                 continue
@@ -341,10 +374,37 @@ def generate(
                 draft = draft | forced
                 pending = pending & ~forced
                 draft_conf = torch.where(forced, confidences, draft_conf)
+                draft_age = torch.where(forced, torch.zeros_like(draft_age), draft_age)
             elif draft.any():
-                # No pending token left and drafts no longer improve: accept drafts.
-                confirmed = confirmed | draft
-                draft = torch.zeros_like(draft)
+                # Only finalize drafts that have reached a minimum draft confidence.
+                finalize_candidates = draft & (draft_conf >= min_draft_conf_for_finalize)
+                if finalize_candidates.any():
+                    confirmed = confirmed | finalize_candidates
+                    draft = draft & ~finalize_candidates
+                    draft_conf = torch.where(
+                        finalize_candidates,
+                        torch.full_like(draft_conf, -float("inf")),
+                        draft_conf,
+                    )
+                    draft_age = torch.where(
+                        finalize_candidates, torch.zeros_like(draft_age), draft_age
+                    )
+                else:
+                    # If all remaining drafts are low-confidence, recycle the weakest one.
+                    recycle_scores = torch.where(
+                        draft, draft_conf, torch.full_like(draft_conf, float("inf"))
+                    )
+                    recycle = torch.zeros_like(draft)
+                    recycle.view(-1)[recycle_scores.argmin()] = True
+                    x = torch.where(recycle, torch.full_like(x, mask_token_id), x)
+                    pending = pending | recycle
+                    draft = draft & ~recycle
+                    draft_conf = torch.where(
+                        recycle,
+                        torch.full_like(draft_conf, -float("inf")),
+                        draft_conf,
+                    )
+                    draft_age = torch.where(recycle, torch.zeros_like(draft_age), draft_age)
 
         # Extract and append generated tokens
         all_tokens.extend(x[0, prompt_len : prompt_len + block_len].tolist())

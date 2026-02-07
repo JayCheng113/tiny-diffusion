@@ -33,6 +33,8 @@ def parse_args():
     p.add_argument("--base-confirm-threshold", type=float, default=0.85)
     p.add_argument("--base-replace-margin", type=float, default=1.0)
     p.add_argument("--base-target-chunk-len", type=int, default=240)
+    p.add_argument("--base-min-draft-conf-for-finalize", type=float, default=0.0)
+    p.add_argument("--base-max-draft-age", type=int, default=0)
 
     # Sweep (new_two_stage) grid
     p.add_argument("--sweep-confidence-threshold", default="0.95")
@@ -40,6 +42,8 @@ def parse_args():
     p.add_argument("--sweep-confirm-threshold", default="0.85,0.88")
     p.add_argument("--sweep-replace-margin", default="0.0,0.02,0.05")
     p.add_argument("--sweep-target-chunk-len", default="240")
+    p.add_argument("--sweep-min-draft-conf-for-finalize", default="0.0,0.5,0.7")
+    p.add_argument("--sweep-max-draft-age", default="0,4,8")
 
     p.add_argument("--output-dir", default="sweep_generate_reports")
     return p.parse_args()
@@ -202,6 +206,8 @@ def main():
         "confirm_threshold": args.base_confirm_threshold,
         "replace_margin": args.base_replace_margin,
         "target_chunk_len": args.base_target_chunk_len,
+        "min_draft_conf_for_finalize": args.base_min_draft_conf_for_finalize,
+        "max_draft_age": args.base_max_draft_age,
     }
 
     sweep_conf = parse_list(args.sweep_confidence_threshold, float)
@@ -209,10 +215,18 @@ def main():
     sweep_confirm = parse_list(args.sweep_confirm_threshold, float)
     sweep_margin = parse_list(args.sweep_replace_margin, float)
     sweep_chunk = parse_list(args.sweep_target_chunk_len, int)
+    sweep_min_finalize = parse_list(args.sweep_min_draft_conf_for_finalize, float)
+    sweep_max_age = parse_list(args.sweep_max_draft_age, int)
 
     new_cfgs = []
-    for c, d, cf, m, ch in itertools.product(
-        sweep_conf, sweep_draft, sweep_confirm, sweep_margin, sweep_chunk
+    for c, d, cf, m, ch, mf, ma in itertools.product(
+        sweep_conf,
+        sweep_draft,
+        sweep_confirm,
+        sweep_margin,
+        sweep_chunk,
+        sweep_min_finalize,
+        sweep_max_age,
     ):
         if d > cf:
             continue
@@ -222,6 +236,8 @@ def main():
             "confirm_threshold": cf,
             "replace_margin": m,
             "target_chunk_len": ch,
+            "min_draft_conf_for_finalize": mf,
+            "max_draft_age": ma,
         }
         new_cfgs.append(cfg)
 
