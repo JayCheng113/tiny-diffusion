@@ -10,10 +10,14 @@ from pathlib import Path
 VARIANTS = {
     "rope": "diffusion.py",
     "polar": "diffusion_polar.py",
+    "transformer_sinusoidal": "diffusion_transformer_pe.py",
+    "bert_learned": "diffusion_bert_pe.py",
+    "alibi": "diffusion_alibi.py",
 }
 
 METRIC_RE = re.compile(r"METRIC step=(\d+) train_loss=([0-9.]+) val_loss=([0-9.]+)")
 BEST_RE = re.compile(r"METRIC best_val_loss=([0-9.]+)")
+VARIANT_ORDER = list(VARIANTS.keys())
 
 
 def parse_seeds(seed_text):
@@ -127,8 +131,14 @@ def make_plots(records, summary, output_dir):
 
     # Plot 1: mean +/- std validation curve over steps
     fig, ax = plt.subplots(figsize=(8, 5))
-    colors = {"rope": "#1f77b4", "polar": "#d62728"}
-    for variant in ["rope", "polar"]:
+    colors = {
+        "rope": "#1f77b4",
+        "polar": "#d62728",
+        "transformer_sinusoidal": "#2ca02c",
+        "bert_learned": "#ff7f0e",
+        "alibi": "#9467bd",
+    }
+    for variant in VARIANT_ORDER:
         runs = by_variant.get(variant, [])
         if not runs:
             continue
@@ -155,7 +165,7 @@ def make_plots(records, summary, output_dir):
 
     # Plot 2: best/final val loss bar chart with std error bars
     fig, ax = plt.subplots(figsize=(8, 5))
-    variants = ["rope", "polar"]
+    variants = [v for v in VARIANT_ORDER if v in summary]
     x = list(range(len(variants)))
     width = 0.36
 
@@ -185,7 +195,7 @@ def make_plots(records, summary, output_dir):
     ax.set_xticks(x)
     ax.set_xticklabels(variants)
     ax.set_ylabel("Loss")
-    ax.set_title("A/B Summary (mean ± std across seeds)")
+    ax.set_title("Positional Encoding Summary (mean ± std across seeds)")
     ax.grid(axis="y", alpha=0.25)
     ax.legend()
     bar_path = output_dir / "summary_bars.png"
@@ -197,7 +207,9 @@ def make_plots(records, summary, output_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="A/B compare RoPE vs Polar positional encoding")
+    parser = argparse.ArgumentParser(
+        description="Compare multiple positional encoding variants for diffusion training"
+    )
     parser.add_argument("--python", default=sys.executable, help="Python executable to run training scripts")
     parser.add_argument("--seeds", default="1337,2027,9001", help="Comma-separated random seeds")
     parser.add_argument("--max-iters", type=int, default=3000)
@@ -222,7 +234,7 @@ def main():
     seeds = parse_seeds(args.seeds)
 
     all_records = []
-    for variant in ["rope", "polar"]:
+    for variant in VARIANT_ORDER:
         for seed in seeds:
             all_records.append(run_one(repo_dir, args.python, variant, seed, args))
 
@@ -250,7 +262,9 @@ def main():
     output_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print("\\n=== Summary ===")
-    for variant in ["rope", "polar"]:
+    for variant in VARIANT_ORDER:
+        if variant not in summary:
+            continue
         s = summary[variant]
         print(
             f"{variant}: best_val={s['best_val_loss_mean']:.4f}±{s['best_val_loss_std']:.4f}, "
