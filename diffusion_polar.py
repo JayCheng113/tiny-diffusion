@@ -4,6 +4,7 @@
 import os
 import sys
 import time
+import math
 
 import torch
 import torch.nn as nn
@@ -105,16 +106,17 @@ def norm(x):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, mask_gate_alpha=0.3):
+    def __init__(self, mask_gate_alpha=0.5):
         super().__init__()
         self.c_q = nn.Linear(n_embd, n_embd, bias=False)
         self.c_k = nn.Linear(n_embd, n_embd, bias=False)
         self.c_v = nn.Linear(n_embd, n_embd, bias=False)
         self.c_proj = nn.Linear(n_embd, n_embd, bias=False)
         self.phi = nn.Parameter(torch.zeros(head_dim))
+        self.phi_max = math.pi / 4.0
         self.mask_gate_alpha = float(mask_gate_alpha)
 
-    def forward(self, x, pos_gate, token_is_mask):
+    def forward(self, x, pos_cos, pos_sin, token_is_mask):
         B, T, C = x.size()
 
         q = self.c_q(x).view(B, T, n_head, head_dim)
@@ -124,8 +126,13 @@ class MultiHeadAttention(nn.Module):
         a = torch.where(token_is_mask, self.mask_gate_alpha, 1.0)
         a = a.to(q.dtype).view(B, T, 1, 1)
 
-        phi = self.phi.to(q.dtype).view(1, 1, 1, head_dim)
-        gate = pos_gate[:, :T].to(q.dtype) * torch.cos(phi)
+        # Constrain learnable phase to a bounded range for stability.
+        phi = (self.phi_max * torch.tanh(self.phi)).to(q.dtype).view(1, 1, 1, head_dim)
+        cos_phi = torch.cos(phi)
+        sin_phi = torch.sin(phi)
+        pos_cos = pos_cos[:, :T].to(q.dtype)
+        pos_sin = pos_sin[:, :T].to(q.dtype)
+        gate = pos_cos * cos_phi - pos_sin * sin_phi
 
         q = q * gate * a
         k = k * gate * a
@@ -165,8 +172,8 @@ class Block(nn.Module):
         self.attn = MultiHeadAttention()
         self.mlp = MLP()
 
-    def forward(self, x, pos_gate, token_is_mask):
-        x = x + self.attn(norm(x), pos_gate, token_is_mask)
+    def forward(self, x, pos_cos, pos_sin, token_is_mask):
+        x = x + self.attn(norm(x), pos_cos, pos_sin, token_is_mask)
         x = x + self.mlp(norm(x))
         return x
 
@@ -180,8 +187,9 @@ class Model(nn.Module):
 
         # [NEW]: Polar (per-dim) positional gate for Q/K, cached as a buffer
         self.pos_seq_len = block_size * 2  # same spirit as old rotary_seq_len
-        pos_gate = self._precompute_polar_gate(self.pos_seq_len)  # (1, L, 1, head_dim)
-        self.register_buffer("pos_gate", pos_gate, persistent=False)
+        pos_cos, pos_sin = self._precompute_polar_gate(self.pos_seq_len)  # (1, L, 1, head_dim)
+        self.register_buffer("pos_cos", pos_cos, persistent=False)
+        self.register_buffer("pos_sin", pos_sin, persistent=False)
 
         # Transformer blocks
         self.blocks = nn.ModuleList([Block() for _ in range(n_layer)])
@@ -203,7 +211,8 @@ class Model(nn.Module):
         """
         Polar per-dimension phase gate:
             gate[i, k] = cos(i * omega_k + phi_k)
-        Here we cache cos(i * omega_k) and keep phi_k as learnable in the attention module.
+        Cache both cos(i * omega_k) and sin(i * omega_k) so attention can apply
+        exact phase shift: cos(phase + phi).
         """
         if device is None:
             device = self.token_emb.weight.device
@@ -214,8 +223,9 @@ class Model(nn.Module):
         t = torch.arange(seq_len, dtype=torch.float32, device=device)
         phase = torch.outer(t, omega)
 
-        gate = torch.cos(phase)[None, :, None, :]
-        return gate
+        pos_cos = torch.cos(phase)[None, :, None, :]
+        pos_sin = torch.sin(phase)[None, :, None, :]
+        return pos_cos, pos_sin
 
     def forward(self, idx, targets=None, mask=None):
         B, T = idx.size()
@@ -223,12 +233,13 @@ class Model(nn.Module):
         x = self.token_emb(idx)
         x = norm(x)
 
-        assert T <= self.pos_gate.size(1)
-        pos_gate = self.pos_gate[:, :T]
+        assert T <= self.pos_cos.size(1)
+        pos_cos = self.pos_cos[:, :T]
+        pos_sin = self.pos_sin[:, :T]
         token_is_mask = idx == mask_token_id
 
         for block in self.blocks:
-            x = block(x, pos_gate, token_is_mask)
+            x = block(x, pos_cos, pos_sin, token_is_mask)
         x = norm(x)
 
         # Predict denoised tokens
