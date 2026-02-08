@@ -5,11 +5,12 @@ import os
 import time
 import argparse
 import json
+import math
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 
 try:
     from transformers import AutoTokenizer
@@ -28,16 +29,40 @@ device = (
     else ("mps" if torch.backends.mps.is_available() else "cpu")
 )
 eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
+n_embd = 512
+n_head = 8
+n_layer = 8
 head_dim = n_embd // n_head
+ffn_intermediate_size = None
+ffn_dropout = 0.0
+ffn_hidden_act = "silu"
+rope_base = 1e6
+rms_norm_eps = 1e-5
+max_position_embeddings = 32768
+rope_scaling = {
+    "original_max_position_embeddings": 2048,
+    "factor": 16,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "attention_factor": 1.0,
+}
 # ------------
 torch.manual_seed(1337)
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train or run tiny diffusion model")
     parser.add_argument("--train", action="store_true", help="Train from scratch")
+    parser.add_argument("--hidden-size", type=int, default=n_embd)
+    parser.add_argument("--num-hidden-layers", type=int, default=n_layer)
+    parser.add_argument("--num-attention-heads", type=int, default=n_head)
+    parser.add_argument("--intermediate-size", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=ffn_dropout)
+    parser.add_argument("--hidden-act", default=ffn_hidden_act, choices=["relu", "gelu", "silu"])
+    parser.add_argument("--rms-norm-eps", type=float, default=rms_norm_eps)
+    parser.add_argument("--rope-theta", type=float, default=rope_base)
+    parser.add_argument("--max-position-embeddings", type=int, default=max_position_embeddings)
+    parser.add_argument("--inference-rope-scaling", action="store_true")
+    parser.add_argument("--target-vocab-size", type=int, default=6400)
     parser.add_argument(
         "--use-tokenizer",
         action="store_true",
@@ -133,6 +158,8 @@ def find_unused_char(text):
 class PretrainDataset(Dataset):
     def __init__(self, data_path, tokenizer, text_field="text", max_length=512):
         super().__init__()
+        self.data_path = data_path
+        self.text_field = text_field
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.pad_token_id = tokenizer.pad_token_id
@@ -144,13 +171,45 @@ class PretrainDataset(Dataset):
         if self.bos_token_id is None or self.eos_token_id is None:
             raise ValueError("Tokenizer must define bos_token_id and eos_token_id.")
 
-        self.samples = load_text_samples(data_path, text_field)
+        self.is_jsonl = data_path.endswith(".jsonl")
+        if self.is_jsonl:
+            self.offsets = []
+            with open(data_path, "r", encoding="utf-8") as f:
+                while True:
+                    offset = f.tell()
+                    line = f.readline()
+                    if not line:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    row = json.loads(line)
+                    value = row.get(text_field, "")
+                    if isinstance(value, str) and value:
+                        self.offsets.append(offset)
+                    elif value:
+                        self.offsets.append(offset)
+            if not self.offsets:
+                raise ValueError(
+                    f"No usable rows found in {data_path}. Check --jsonl-field {text_field!r}."
+                )
+        else:
+            self.samples = load_text_samples(data_path, text_field)
 
     def __len__(self):
+        if self.is_jsonl:
+            return len(self.offsets)
         return len(self.samples)
 
     def __getitem__(self, index):
-        sample = self.samples[index]
+        if self.is_jsonl:
+            with open(self.data_path, "r", encoding="utf-8") as f:
+                f.seek(self.offsets[index])
+                row = json.loads(f.readline())
+            value = row.get(self.text_field, "")
+            sample = value if isinstance(value, str) else str(value)
+        else:
+            sample = self.samples[index]
         tokens = self.tokenizer(
             str(sample),
             add_special_tokens=False,
@@ -176,6 +235,33 @@ args = parse_args()
 block_size = args.seq_len
 if block_size <= 0:
     raise ValueError("--seq-len must be > 0")
+if args.hidden_size <= 0 or args.num_hidden_layers <= 0 or args.num_attention_heads <= 0:
+    raise ValueError("hidden-size/num-hidden-layers/num-attention-heads must be > 0")
+if args.hidden_size % args.num_attention_heads != 0:
+    raise ValueError("hidden-size must be divisible by num-attention-heads")
+
+n_embd = args.hidden_size
+n_head = args.num_attention_heads
+n_layer = args.num_hidden_layers
+head_dim = n_embd // n_head
+ffn_intermediate_size = args.intermediate_size
+ffn_dropout = args.dropout
+ffn_hidden_act = args.hidden_act
+rms_norm_eps = args.rms_norm_eps
+rope_base = args.rope_theta
+max_position_embeddings = args.max_position_embeddings
+rope_scaling = (
+    {
+        "original_max_position_embeddings": 2048,
+        "factor": 16,
+        "beta_fast": 32.0,
+        "beta_slow": 1.0,
+        "attention_factor": 1.0,
+        "type": "yarn",
+    }
+    if args.inference_rope_scaling
+    else None
+)
 
 if args.use_tokenizer:
     if AutoTokenizer is None:
@@ -187,6 +273,9 @@ if args.use_tokenizer:
     mask_token = "<|mask|>"
     if mask_token not in tokenizer.get_vocab():
         tokenizer.add_special_tokens({"additional_special_tokens": [mask_token]})
+    if args.target_vocab_size is not None and args.target_vocab_size > len(tokenizer):
+        extra_count = args.target_vocab_size - len(tokenizer)
+        tokenizer.add_tokens([f"<|extra_{i}|>" for i in range(extra_count)])
     mask_token_id = tokenizer.convert_tokens_to_ids(mask_token)
     pad_token_id = tokenizer.pad_token_id
     vocab_size = len(tokenizer)
@@ -197,15 +286,21 @@ if args.use_tokenizer:
         text_field=args.jsonl_field,
         max_length=block_size,
     )
-    all_data = torch.stack([dataset[i] for i in range(len(dataset))])
-    if all_data.size(0) < 2:
+    if len(dataset) < 2:
         raise ValueError("Need at least 2 samples for train/val split in tokenizer mode.")
-    n = int(0.9 * all_data.size(0))
-    n = min(max(1, n), all_data.size(0) - 1)
-    train_data = all_data[:n]
-    val_data = all_data[n:]
+    train_size = int(0.9 * len(dataset))
+    train_size = min(max(1, train_size), len(dataset) - 1)
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(1337),
+    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+    loader_iters = {"train": iter(train_loader), "val": iter(val_loader)}
 
-    first_sample = train_data[0]
+    first_sample = train_dataset[0]
     prompt_tokens = first_sample[first_sample != pad_token_id].tolist()
     if len(prompt_tokens) < 2:
         raise ValueError("First training sample has too few non-pad tokens.")
@@ -250,10 +345,14 @@ else:
 # [NEW]: Modify get batch to do masking
 def get_batch(split):
     # generate a small batch of data of inputs x and targets y
-    data = train_data if split == "train" else val_data
     if args.use_tokenizer:
-        idx = torch.randint(data.size(0), (batch_size,))
-        x = data[idx].clone()
+        loader = train_loader if split == "train" else val_loader
+        try:
+            x = next(loader_iters[split])
+        except StopIteration:
+            loader_iters[split] = iter(loader)
+            x = next(loader_iters[split])
+        x = x.clone()
         y = x.clone()  # original tokens
         candidate_mask = (
             (x != pad_token_id)
@@ -261,14 +360,16 @@ def get_batch(split):
             & (x != tokenizer.eos_token_id)
         )
     else:
+        data = train_data if split == "train" else val_data
         idx = torch.randint(len(data) - block_size, (batch_size,))
         x = torch.stack([data[i : i + block_size] for i in idx])
         y = x.clone()  # original tokens
         candidate_mask = torch.ones_like(x, dtype=torch.bool)
 
     # Mask tokens with random probability per sample
-    mask_probs = torch.rand(batch_size, 1)
-    mask = (torch.rand(batch_size, block_size) < mask_probs) & candidate_mask
+    bsz, seq_len = x.size()
+    mask_probs = torch.rand(bsz, 1)
+    mask = (torch.rand(bsz, seq_len) < mask_probs) & candidate_mask
     mask = ensure_nonempty_mask(mask, candidate_mask)
     x[mask] = mask_token_id
 
@@ -278,18 +379,67 @@ def get_batch(split):
 
 def norm(x):
     # Purely functional rmsnorm with no learnable params
-    return F.rms_norm(x, (x.size(-1),))
+    return F.rms_norm(x, (x.size(-1),), eps=rms_norm_eps)
+
+
+def get_activation(name):
+    if name == "relu":
+        return F.relu
+    if name == "gelu":
+        return F.gelu
+    if name == "silu":
+        return F.silu
+    raise ValueError(f"Unsupported activation: {name}")
+
+
+def precompute_freqs_cis(dim, end, rope_base, rope_scaling=None, device=None):
+    if device is None:
+        device = "cpu"
+
+    freqs = 1.0 / (
+        rope_base ** (torch.arange(0, dim, 2, device=device).float()[: (dim // 2)] / dim)
+    )
+    attn_factor = 1.0
+
+    if rope_scaling is not None:
+        orig_max = rope_scaling.get("original_max_position_embeddings", 2048)
+        factor = rope_scaling.get("factor", 16)
+        beta_fast = rope_scaling.get("beta_fast", 32.0)
+        beta_slow = rope_scaling.get("beta_slow", 1.0)
+        attn_factor = rope_scaling.get("attention_factor", 1.0)
+
+        if end / orig_max > 1.0:
+            # YaRN: f'(i) = f(i)((1-gamma) + gamma/s), gamma is a linear ramp.
+            inv_dim = lambda b: (
+                dim * math.log(orig_max / (b * 2 * math.pi)) / (2 * math.log(rope_base))
+            )
+            low = max(math.floor(inv_dim(beta_fast)), 0)
+            high = min(math.ceil(inv_dim(beta_slow)), dim // 2 - 1)
+            ramp = torch.clamp(
+                (torch.arange(dim // 2, device=device).float() - low)
+                / max(high - low, 0.001),
+                0,
+                1,
+            )
+            freqs = freqs * (1 - ramp + ramp / factor)
+
+    t = torch.arange(end, device=device)
+    freqs = torch.outer(t, freqs).float()
+    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
+    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
+    return freqs_cos, freqs_sin
+
+
+def rotate_half(x):
+    d = x.shape[-1] // 2
+    x1, x2 = x[..., :d], x[..., d:]
+    return torch.cat([-x2, x1], dim=-1)
 
 
 def apply_rotary_emb(x, cos, sin):
     assert x.ndim == 4  # multihead attention
-    d = x.shape[3] // 2
-    x1, x2 = x[..., :d], x[..., d:]  # split up last time into two halves
-    y1 = x1 * cos + x2 * sin  # rotate pairs of dims
-    y2 = x1 * (-sin) + x2 * cos
-    out = torch.cat([y1, y2], 3)  # re-assemble
-    out = out.to(x.dtype)  # ensure input/output dtypes match
-    return out
+    out = (x * cos) + (rotate_half(x) * sin)
+    return out.to(x.dtype)
 
 
 class MultiHeadAttention(nn.Module):
@@ -330,14 +480,21 @@ class MultiHeadAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self):
         super().__init__()
-        self.c_fc = nn.Linear(n_embd, 4 * n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * n_embd, n_embd, bias=False)
+        intermediate_size = ffn_intermediate_size
+        if intermediate_size is None:
+            intermediate_size = int(n_embd * 8 / 3)
+            intermediate_size = 64 * ((intermediate_size + 64 - 1) // 64)
+
+        self.gate_proj = nn.Linear(n_embd, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, n_embd, bias=False)
+        self.up_proj = nn.Linear(n_embd, intermediate_size, bias=False)
+        self.dropout = nn.Dropout(ffn_dropout)
+        self.act_fn = get_activation(ffn_hidden_act)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = F.relu(x).square()
-        x = self.c_proj(x)
-        return x
+        x = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        x = self.down_proj(x)
+        return self.dropout(x)
 
 
 class Block(nn.Module):
@@ -360,7 +517,7 @@ class Model(nn.Module):
         self.token_emb = nn.Embedding(vocab_size, n_embd)
 
         # Rotary embeddings
-        self.rotary_seq_len = block_size * 2
+        self.rotary_seq_len = max(max_position_embeddings, block_size * 2)
         cos, sin = self._precompute_rotary_embeddings(self.rotary_seq_len)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -384,15 +541,14 @@ class Model(nn.Module):
     def _precompute_rotary_embeddings(self, seq_len, base=10000, device=None):
         if device is None:
             device = self.token_emb.weight.device
-        channel_range = torch.arange(0, head_dim, 2, dtype=torch.float32, device=device)
-        inv_freq = 1.0 / (base ** (channel_range / head_dim))
-        t = torch.arange(seq_len, dtype=torch.float32, device=device)
-        freqs = torch.outer(t, inv_freq)
-        cos, sin = freqs.cos(), freqs.sin()
-        cos, sin = (
-            cos[None, :, None, :],
-            sin[None, :, None, :],
-        )  # add batch and head dims
+        cos, sin = precompute_freqs_cis(
+            dim=head_dim,
+            end=seq_len,
+            rope_base=rope_base,
+            rope_scaling=rope_scaling,
+            device=device,
+        )
+        cos, sin = cos[None, :, None, :], sin[None, :, None, :]
         return cos, sin
 
     def forward(self, idx, targets=None, mask=None):
@@ -527,7 +683,7 @@ if __name__ == "__main__":
     print(sum(p.numel() for p in m.parameters()) / 1e6, "M parameters")
     if args.use_tokenizer:
         print(
-            f"Corpus: {args.data}, samples: {all_data.size(0)}, seq_len: {block_size}, vocab: {vocab_size}"
+            f"Corpus: {args.data}, samples: {len(dataset)}, seq_len: {block_size}, vocab: {vocab_size}"
         )
     else:
         print(f"Corpus: {args.data}, chars: {len(text)}, vocab: {vocab_size}")
