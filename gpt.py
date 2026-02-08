@@ -2,8 +2,9 @@
 # nanochat: https://github.com/karpathy/nanochat/blob/master/nanochat/gpt.py
 # "Let's build GPT" video: https://github.com/karpathy/ng-video-lecture/blob/master/gpt.py
 import os
-import sys
 import time
+import argparse
+import json
 
 import torch
 import torch.nn as nn
@@ -28,9 +29,55 @@ head_dim = n_embd // n_head
 # ------------
 torch.manual_seed(1337)
 
-# Load data
-with open("data.txt", "r", encoding="utf-8") as f:
-    text = f.read()
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train or run tiny GPT model")
+    parser.add_argument("--train", action="store_true", help="Train from scratch")
+    parser.add_argument(
+        "--data",
+        default="data.txt",
+        help="Text corpus path. Supports .txt and .jsonl",
+    )
+    parser.add_argument(
+        "--jsonl-field",
+        default="text",
+        help="Field name to read from each jsonl row",
+    )
+    parser.add_argument(
+        "--jsonl-sep",
+        default="\n",
+        help="Separator used when concatenating jsonl rows",
+    )
+    return parser.parse_args()
+
+
+def load_text_corpus(path, jsonl_field, jsonl_sep):
+    if path.endswith(".jsonl"):
+        lines = []
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                value = row.get(jsonl_field, "")
+                if isinstance(value, str) and value:
+                    lines.append(value)
+                elif value:
+                    lines.append(str(value))
+        if not lines:
+            raise ValueError(
+                f"No usable rows found in {path}. Check --jsonl-field {jsonl_field!r}."
+            )
+        return jsonl_sep.join(lines)
+
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+args = parse_args()
+text = load_text_corpus(args.data, args.jsonl_field, args.jsonl_sep)
+if len(text) <= block_size:
+    raise ValueError(f"Corpus too short ({len(text)} chars). Need > block_size={block_size}.")
 
 # All the unique characters that occur in this text
 chars = sorted(list(set(text)))
@@ -258,7 +305,7 @@ def estimate_loss():
 
 
 if __name__ == "__main__":
-    train_flag = "--train" in sys.argv
+    train_flag = args.train
     weights_path = "weights/gpt.pt"
     os.makedirs(os.path.dirname(weights_path), exist_ok=True)
 
@@ -267,6 +314,7 @@ if __name__ == "__main__":
 
     # print the number of parameters in the model
     print(sum(p.numel() for p in m.parameters()) / 1e6, "M parameters")
+    print(f"Corpus: {args.data}, chars: {len(text)}, vocab: {vocab_size}")
 
     # Load weights if they exist and train flag not set
     if os.path.exists(weights_path) and not train_flag:

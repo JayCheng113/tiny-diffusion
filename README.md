@@ -44,6 +44,17 @@ uv run diffusion.py --train
 # Train GPT model
 uv run gpt.py --train
 ```
+
+To train from a JSONL dataset, pass `--data` and the text field name:
+
+```bash
+# JSONL row example: {"text": "..."}
+uv run diffusion.py --train --data your_dataset.jsonl --jsonl-field text
+uv run gpt.py --train --data your_dataset.jsonl --jsonl-field text
+```
+
+If your JSONL uses another key (e.g. `content`), replace `--jsonl-field text` with that key.
+
 The `gpt` model trains for 5,000 iterations while the `diffusion` model trains for 10,000, taking ~10 and ~20 minutes respectively on an A100 GPU. The weights are saved to the `weights/` directory.
 
 The diffusion model trains for twice as long because half as many tokens count towards the loss during training (only masked tokens contribute to the loss).
