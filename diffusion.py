@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
+import matplotlib.pyplot as plt
 
 try:
     from transformers import AutoTokenizer
@@ -25,8 +26,8 @@ except ImportError:
 # hyperparameters
 batch_size = 64  # how many independent sequences will we process in parallel?
 block_size = 256  # default context length (can be overridden by --seq-len)
-max_iters = 10000
-eval_interval = 500
+max_iters = 25000
+eval_interval = 1000
 learning_rate = 3e-4
 device = (
     "cuda"
@@ -53,6 +54,7 @@ rope_scaling = {
 }
 # ------------
 torch.manual_seed(1337)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train or run tiny diffusion model")
@@ -702,15 +704,23 @@ if __name__ == "__main__":
 
         # create a PyTorch optimizer
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        train_steps = []
+        train_losses = []
+        eval_steps = []
+        eval_train_losses = []
+        eval_val_losses = []
 
         start = time.time()
         pbar = tqdm(total=max_iters, desc="Training", dynamic_ncols=True) if tqdm else None
-        for iter in range(max_iters):
+        for step in range(max_iters):
             # every once in a while evaluate the loss on train and val sets
-            if iter % eval_interval == 0 or iter == max_iters - 1:
+            if step % eval_interval == 0 or step == max_iters - 1:
                 losses = estimate_loss()
+                eval_steps.append(step)
+                eval_train_losses.append(losses["train"].item())
+                eval_val_losses.append(losses["val"].item())
                 print(
-                    f"step {iter}: train loss {losses['train']:.4f},"
+                    f"step {step}: train loss {losses['train']:.4f},"
                     f"val loss {losses['val']:.4f}, time {time.time() - start:.2f} seconds"
                 )
                 # Generate a sample
@@ -725,17 +735,19 @@ if __name__ == "__main__":
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+            train_steps.append(step)
+            train_losses.append(loss.item())
 
             if pbar is not None:
                 pbar.update(1)
-                if iter % 10 == 0:
+                if step % 10 == 0:
                     pbar.set_postfix(loss=f"{loss.item():.4f}")
-            elif iter % 100 == 0:
+            elif step % 100 == 0:
                 elapsed = time.time() - start
-                speed = (iter + 1) / max(elapsed, 1e-6)
-                eta = (max_iters - iter - 1) / max(speed, 1e-6)
+                speed = (step + 1) / max(elapsed, 1e-6)
+                eta = (max_iters - step - 1) / max(speed, 1e-6)
                 print(
-                    f"progress {iter + 1}/{max_iters}, "
+                    f"progress {step + 1}/{max_iters}, "
                     f"loss {loss.item():.4f}, eta {eta:.1f}s"
                 )
 
@@ -746,6 +758,26 @@ if __name__ == "__main__":
         print(f"Total training time: {time.time() - start:.2f} seconds")
         print(f"Saving weights to {weights_path}")
         torch.save(m.state_dict(), weights_path)
+
+        # Save loss curve
+        plot_path = (
+            "weights/diffusion_tokenizer_loss.png"
+            if args.use_tokenizer
+            else "weights/diffusion_loss.png"
+        )
+        plt.figure(figsize=(10, 6))
+        plt.plot(train_steps, train_losses, label="train (per step)", alpha=0.35)
+        plt.plot(eval_steps, eval_train_losses, label="train (eval avg)", linewidth=2)
+        plt.plot(eval_steps, eval_val_losses, label="val (eval avg)", linewidth=2)
+        plt.xlabel("Step")
+        plt.ylabel("Loss")
+        plt.title("Training Loss Curve")
+        plt.legend()
+        plt.grid(True, alpha=0.25)
+        plt.tight_layout()
+        plt.savefig(plot_path, dpi=150)
+        plt.close()
+        print(f"Saved loss plot to {plot_path}")
 
     # generate from the model
     start = time.time()
