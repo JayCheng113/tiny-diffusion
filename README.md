@@ -55,6 +55,12 @@ uv run gpt.py --train --data your_dataset.jsonl --jsonl-field text
 
 If your JSONL uses another key (e.g. `content`), replace `--jsonl-field text` with that key.
 
+To train diffusion with the local tokenizer (`tokenizer.json` + `tokenizer_config.json`):
+
+```bash
+uv run diffusion.py --train --use-tokenizer --tokenizer-dir . --data your_dataset.jsonl --jsonl-field text --seq-len 256
+```
+
 The `gpt` model trains for 5,000 iterations while the `diffusion` model trains for 10,000, taking ~10 and ~20 minutes respectively on an A100 GPU. The weights are saved to the `weights/` directory.
 
 The diffusion model trains for twice as long because half as many tokens count towards the loss during training (only masked tokens contribute to the loss).
