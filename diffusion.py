@@ -17,6 +17,11 @@ try:
 except ImportError:
     AutoTokenizer = None
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:
+    tqdm = None
+
 # hyperparameters
 batch_size = 64  # how many independent sequences will we process in parallel?
 block_size = 256  # default context length (can be overridden by --seq-len)
@@ -699,6 +704,7 @@ if __name__ == "__main__":
         optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
         start = time.time()
+        pbar = tqdm(total=max_iters, desc="Training", dynamic_ncols=True) if tqdm else None
         for iter in range(max_iters):
             # every once in a while evaluate the loss on train and val sets
             if iter % eval_interval == 0 or iter == max_iters - 1:
@@ -719,6 +725,22 @@ if __name__ == "__main__":
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
+
+            if pbar is not None:
+                pbar.update(1)
+                if iter % 10 == 0:
+                    pbar.set_postfix(loss=f"{loss.item():.4f}")
+            elif iter % 100 == 0:
+                elapsed = time.time() - start
+                speed = (iter + 1) / max(elapsed, 1e-6)
+                eta = (max_iters - iter - 1) / max(speed, 1e-6)
+                print(
+                    f"progress {iter + 1}/{max_iters}, "
+                    f"loss {loss.item():.4f}, eta {eta:.1f}s"
+                )
+
+        if pbar is not None:
+            pbar.close()
 
         # Save the model weights
         print(f"Total training time: {time.time() - start:.2f} seconds")
