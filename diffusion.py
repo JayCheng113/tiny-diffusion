@@ -106,6 +106,12 @@ def parse_args():
         default=None,
         help="Optional checkpoint path for loading/saving weights",
     )
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=max_iters,
+        help="Total training steps target (supports resume)",
+    )
     return parser.parse_args()
 
 
@@ -262,6 +268,9 @@ ffn_hidden_act = args.hidden_act
 rms_norm_eps = args.rms_norm_eps
 rope_base = args.rope_theta
 max_position_embeddings = args.max_position_embeddings
+max_iters = args.max_iters
+if max_iters <= 0:
+    raise ValueError("--max-iters must be > 0")
 rope_scaling = (
     {
         "original_max_position_embeddings": 2048,
