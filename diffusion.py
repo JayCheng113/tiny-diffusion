@@ -101,6 +101,11 @@ def parse_args():
         default=block_size,
         help="Sequence length used for training/generation",
     )
+    parser.add_argument(
+        "--weights-path",
+        default=None,
+        help="Optional checkpoint path for loading/saving weights",
+    )
     return parser.parse_args()
 
 
@@ -678,13 +683,24 @@ def estimate_loss():
 
 if __name__ == "__main__":
     train_flag = args.train
-    weights_path = (
+    default_weights_path = (
         "weights/diffusion_tokenizer.pt" if args.use_tokenizer else "weights/diffusion.pt"
     )
-    os.makedirs(os.path.dirname(weights_path), exist_ok=True)
+    weights_path = args.weights_path or default_weights_path
+    weights_dir = os.path.dirname(weights_path)
+    if weights_dir:
+        os.makedirs(weights_dir, exist_ok=True)
 
     model = Model()
     m = model.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    start_step = 0
+    train_steps = []
+    train_losses = []
+    eval_steps = []
+    eval_train_losses = []
+    eval_val_losses = []
+    checkpoint_loaded = False
 
     # print the number of parameters in the model
     print(sum(p.numel() for p in m.parameters()) / 1e6, "M parameters")
@@ -695,24 +711,51 @@ if __name__ == "__main__":
     else:
         print(f"Corpus: {args.data}, chars: {len(text)}, vocab: {vocab_size}")
 
-    # Load weights if they exist and train flag not set
-    if os.path.exists(weights_path) and not train_flag:
-        print(f"Loading weights from {weights_path}")
-        m.load_state_dict(torch.load(weights_path, map_location=device))
-    else:
-        print("Training from scratch")
+    if os.path.exists(weights_path):
+        print(f"Loading checkpoint from {weights_path}")
+        ckpt = torch.load(weights_path, map_location=device)
+        if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+            m.load_state_dict(ckpt["model_state_dict"])
+            checkpoint_loaded = True
+            if train_flag and "optimizer_state_dict" in ckpt:
+                optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            start_step = int(ckpt.get("step", -1)) + 1 if train_flag else 0
+            train_steps = ckpt.get("train_steps", train_steps)
+            train_losses = ckpt.get("train_losses", train_losses)
+            eval_steps = ckpt.get("eval_steps", eval_steps)
+            eval_train_losses = ckpt.get("eval_train_losses", eval_train_losses)
+            eval_val_losses = ckpt.get("eval_val_losses", eval_val_losses)
+            if train_flag:
+                print(f"Resuming training from step {start_step}")
+        else:
+            # Backward compatibility: old checkpoints saved as raw state_dict.
+            m.load_state_dict(ckpt)
+            checkpoint_loaded = True
+            if train_flag:
+                print("Loaded model weights (no optimizer/step state, resume from step 0)")
+    elif not train_flag:
+        raise FileNotFoundError(
+            f"No checkpoint found at {weights_path}. Use --train to train from scratch."
+        )
 
-        # create a PyTorch optimizer
-        optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-        train_steps = []
-        train_losses = []
-        eval_steps = []
-        eval_train_losses = []
-        eval_val_losses = []
+    if train_flag:
+        if not checkpoint_loaded:
+            print("Training from scratch")
+        elif start_step >= max_iters:
+            print(
+                f"Checkpoint already at/after max_iters ({start_step} >= {max_iters}). Skipping training."
+            )
 
         start = time.time()
-        pbar = tqdm(total=max_iters, desc="Training", dynamic_ncols=True) if tqdm else None
-        for step in range(max_iters):
+        total_train_steps = max(max_iters - start_step, 0)
+        pbar = (
+            tqdm(total=total_train_steps, desc="Training", dynamic_ncols=True)
+            if tqdm and total_train_steps > 0
+            else None
+        )
+        last_step = start_step - 1
+        for step in range(start_step, max_iters):
+            last_step = step
             # every once in a while evaluate the loss on train and val sets
             if step % eval_interval == 0 or step == max_iters - 1:
                 losses = estimate_loss()
@@ -744,7 +787,8 @@ if __name__ == "__main__":
                     pbar.set_postfix(loss=f"{loss.item():.4f}")
             elif step % 100 == 0:
                 elapsed = time.time() - start
-                speed = (step + 1) / max(elapsed, 1e-6)
+                done = step - start_step + 1
+                speed = done / max(elapsed, 1e-6)
                 eta = (max_iters - step - 1) / max(speed, 1e-6)
                 print(
                     f"progress {step + 1}/{max_iters}, "
@@ -756,8 +800,21 @@ if __name__ == "__main__":
 
         # Save the model weights
         print(f"Total training time: {time.time() - start:.2f} seconds")
-        print(f"Saving weights to {weights_path}")
-        torch.save(m.state_dict(), weights_path)
+        print(f"Saving checkpoint to {weights_path}")
+        torch.save(
+            {
+                "model_state_dict": m.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "step": last_step,
+                "train_steps": train_steps,
+                "train_losses": train_losses,
+                "eval_steps": eval_steps,
+                "eval_train_losses": eval_train_losses,
+                "eval_val_losses": eval_val_losses,
+                "args": vars(args),
+            },
+            weights_path,
+        )
 
         # Save loss curve
         plot_path = (
