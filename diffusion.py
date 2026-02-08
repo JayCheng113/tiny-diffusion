@@ -112,6 +112,11 @@ def parse_args():
         default=max_iters,
         help="Total training steps target (supports resume)",
     )
+    parser.add_argument(
+        "--run-name",
+        default=None,
+        help="Optional run name used for checkpoint/loss filenames",
+    )
     return parser.parse_args()
 
 
@@ -692,9 +697,12 @@ def estimate_loss():
 
 if __name__ == "__main__":
     train_flag = args.train
-    default_weights_path = (
-        "weights/diffusion_tokenizer.pt" if args.use_tokenizer else "weights/diffusion.pt"
-    )
+    if args.run_name:
+        default_weights_path = os.path.join("weights", f"{args.run_name}.pt")
+    else:
+        default_weights_path = (
+            "weights/diffusion_tokenizer.pt" if args.use_tokenizer else "weights/diffusion.pt"
+        )
     weights_path = args.weights_path or default_weights_path
     weights_dir = os.path.dirname(weights_path)
     if weights_dir:
@@ -826,11 +834,14 @@ if __name__ == "__main__":
         )
 
         # Save loss curve
-        plot_path = (
-            "weights/diffusion_tokenizer_loss.png"
-            if args.use_tokenizer
-            else "weights/diffusion_loss.png"
-        )
+        if args.run_name:
+            plot_path = os.path.join("weights", f"{args.run_name}_loss.png")
+        else:
+            plot_path = (
+                "weights/diffusion_tokenizer_loss.png"
+                if args.use_tokenizer
+                else "weights/diffusion_loss.png"
+            )
         plt.figure(figsize=(10, 6))
         plt.plot(train_steps, train_losses, label="train (per step)", alpha=0.35)
         plt.plot(eval_steps, eval_train_losses, label="train (eval avg)", linewidth=2)
