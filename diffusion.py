@@ -65,6 +65,9 @@ def parse_args():
     parser.add_argument("--intermediate-size", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=ffn_dropout)
     parser.add_argument("--hidden-act", default=ffn_hidden_act, choices=["relu", "gelu", "silu"])
+    parser.add_argument("--learning-rate", type=float, default=learning_rate)
+    parser.add_argument("--warmup-steps", type=int, default=1000)
+    parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--rms-norm-eps", type=float, default=rms_norm_eps)
     parser.add_argument("--rope-theta", type=float, default=rope_base)
     parser.add_argument("--max-position-embeddings", type=int, default=max_position_embeddings)
@@ -270,12 +273,21 @@ head_dim = n_embd // n_head
 ffn_intermediate_size = args.intermediate_size
 ffn_dropout = args.dropout
 ffn_hidden_act = args.hidden_act
+learning_rate = args.learning_rate
+warmup_steps = args.warmup_steps
+min_lr_ratio = args.min_lr_ratio
 rms_norm_eps = args.rms_norm_eps
 rope_base = args.rope_theta
 max_position_embeddings = args.max_position_embeddings
 max_iters = args.max_iters
 if max_iters <= 0:
     raise ValueError("--max-iters must be > 0")
+if learning_rate <= 0:
+    raise ValueError("--learning-rate must be > 0")
+if warmup_steps < 0:
+    raise ValueError("--warmup-steps must be >= 0")
+if not (0.0 <= min_lr_ratio <= 1.0):
+    raise ValueError("--min-lr-ratio must be in [0, 1]")
 rope_scaling = (
     {
         "original_max_position_embeddings": 2048,
@@ -416,6 +428,22 @@ def get_activation(name):
     if name == "silu":
         return F.silu
     raise ValueError(f"Unsupported activation: {name}")
+
+
+def get_lr(step):
+    max_lr = learning_rate
+    min_lr = learning_rate * min_lr_ratio
+
+    if warmup_steps > 0 and step < warmup_steps:
+        return max_lr * float(step + 1) / float(warmup_steps)
+
+    if max_iters <= warmup_steps:
+        return min_lr
+
+    progress = float(step - warmup_steps) / float(max_iters - warmup_steps)
+    progress = min(max(progress, 0.0), 1.0)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return min_lr + cosine * (max_lr - min_lr)
 
 
 def precompute_freqs_cis(dim, end, rope_base, rope_scaling=None, device=None):
@@ -727,6 +755,10 @@ if __name__ == "__main__":
         )
     else:
         print(f"Corpus: {args.data}, chars: {len(text)}, vocab: {vocab_size}")
+    print(
+        f"LR schedule: warmup+cosine, max_lr={learning_rate:.2e}, "
+        f"min_lr={learning_rate * min_lr_ratio:.2e}, warmup_steps={warmup_steps}"
+    )
 
     if os.path.exists(weights_path):
         print(f"Loading checkpoint from {weights_path}")
@@ -773,6 +805,10 @@ if __name__ == "__main__":
         last_step = start_step - 1
         for step in range(start_step, max_iters):
             last_step = step
+            current_lr = get_lr(step)
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = current_lr
+
             # every once in a while evaluate the loss on train and val sets
             if step % eval_interval == 0 or step == max_iters - 1:
                 losses = estimate_loss()
@@ -781,7 +817,8 @@ if __name__ == "__main__":
                 eval_val_losses.append(losses["val"].item())
                 print(
                     f"step {step}: train loss {losses['train']:.4f},"
-                    f"val loss {losses['val']:.4f}, time {time.time() - start:.2f} seconds"
+                    f"val loss {losses['val']:.4f}, lr {current_lr:.2e}, "
+                    f"time {time.time() - start:.2f} seconds"
                 )
                 # Generate a sample
                 sample = generate(m, max_new_tokens=240)
@@ -801,7 +838,7 @@ if __name__ == "__main__":
             if pbar is not None:
                 pbar.update(1)
                 if step % 10 == 0:
-                    pbar.set_postfix(loss=f"{loss.item():.4f}")
+                    pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{current_lr:.2e}")
             elif step % 100 == 0:
                 elapsed = time.time() - start
                 done = step - start_step + 1
@@ -809,7 +846,7 @@ if __name__ == "__main__":
                 eta = (max_iters - step - 1) / max(speed, 1e-6)
                 print(
                     f"progress {step + 1}/{max_iters}, "
-                    f"loss {loss.item():.4f}, eta {eta:.1f}s"
+                    f"loss {loss.item():.4f}, lr {current_lr:.2e}, eta {eta:.1f}s"
                 )
 
         if pbar is not None:
